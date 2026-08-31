@@ -1,0 +1,7 @@
+/firmware/
+/firmware-*/
+/ipsw_db/
+/sysroot/
+/sysroot.tar.gz
+/mnt/
+/qemu-sptm/build/

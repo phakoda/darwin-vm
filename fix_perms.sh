@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/dmgutil.sh"
+
 fixup_perms() {
     local ramdisk="${1}"
     livemount="$(mktemp -d)"
@@ -10,25 +13,29 @@ fixup_perms() {
         exit 1
     fi
 
-    if ! hdiutil attach -owners on -mountpoint "${livemount}" "${ramdisk}"; then
+    if ! dmg_attach "${ramdisk}" "${livemount}" on; then
         echo "mount failed"
         rmdir "${livemount}"
         exit 1
     fi
 
     echo "mounted ${ramdisk} on ${livemount}"
-    trap 'hdiutil detach ${livemount}; rmdir ${livemount}' EXIT
+    trap 'dmg_detach "${livemount}"; rmdir "${livemount}"' EXIT
 
-    echo "This will run: sudo chown -R root:wheel ${livemount}/bin ${livemount}/System ${livemount}/libexec"
+    # macOS root:wheel and Linux 0:0 are both numeric uid/gid 0/0.
+    local owner_group="root:wheel"
+    [[ "$(uname -s)" == "Linux" ]] && owner_group="0:0"
+
+    echo "This will run: sudo chown -R ${owner_group} ${livemount}/bin ${livemount}/System ${livemount}/libexec"
     read -r -p "Are you sure? (y/n) " response
     echo "${response}"
 
     case "${response}" in
         [Yy])
-            sudo chown -R root:wheel "${livemount}/bin" "${livemount}/System"
+            sudo chown -R "${owner_group}" "${livemount}/bin" "${livemount}/System"
 
             if [[ -d "${livemount}/libexec" ]]; then
-                sudo chown -R root:wheel "${livemount}/libexec"
+                sudo chown -R "${owner_group}" "${livemount}/libexec"
             fi
             echo "done!"
             ;;
@@ -44,10 +51,10 @@ main() {
         exit 1
     fi
 
-    if [[ "$(uname)" != "Darwin" ]]; then
-        echo "you need to run this on a Mac"
-        exit 1
-    fi
+    case "$(uname -s)" in
+        Darwin|Linux) ;;
+        *) echo "unsupported host OS: $(uname -s)"; exit 1 ;;
+    esac
 
     fixup_perms "${1}"
 }

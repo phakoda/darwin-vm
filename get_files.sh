@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/dmgutil.sh"
+
 # Default device: iPhone 16 on iOS 27.0 beta 7 (latest at time of writing)
 # I picked iPhone 16 as the default instead of iPhone 17, as it doesn't have MTE and therefore runs faster.
 # (note that iPhone 16's device name is confusingly "iPhone17,3")
@@ -32,16 +35,34 @@ die() {
 }
 
 ensure_installed() {
-    if [[ ! -x $(command -v "jq") ]]; then
-        die "missing jq command (brew install jq)"
+    local os
+    os="$(uname -s)"
+
+    case "${os}" in
+        Darwin|Linux) ;;
+        *) die "unsupported host OS: ${os}" ;;
+    esac
+
+    if ! command -v jq >/dev/null 2>&1; then
+        die "missing jq command"
     fi
 
-    if [[ ! -x $(command -v "ipsw") ]]; then
-        die "missing ipsw command (brew install ipsw)"
+    if ! command -v ipsw >/dev/null 2>&1; then
+        die "missing ipsw command"
     fi
 
-    if [[ ! -x $(command -v "wget") ]]; then
-        die "missing wget command (brew install wget)"
+    if ! command -v wget >/dev/null 2>&1; then
+        die "missing wget command"
+    fi
+
+    if [[ "${os}" == "Linux" ]]; then
+        if ! command -v ldid >/dev/null 2>&1; then
+            die "missing ldid command (used in place of codesign on Linux; see LINUX.md)"
+        fi
+        if ! command -v sudo >/dev/null 2>&1; then
+            die "missing sudo command (required to mount the APFS ramdisk on Linux)"
+        fi
+        require_linux_apfs || die "Linux APFS read/write support is required; see LINUX.md"
     fi
 }
 
@@ -164,11 +185,6 @@ patch_ramdisk() {
     local ramdisk
     ramdisk="${FW_DIR}/ramdisk.dmg"
 
-    if [[ "$(uname)" != "Darwin" ]]; then
-        echo "This isn't a Mac, so we can't patch the ramdisk- stopping here"
-        exit 0
-    fi
-
     echo "Patching ${ramdisk}"
 
     livemount="$(mktemp -d)"
@@ -177,19 +193,28 @@ patch_ramdisk() {
         die "something's wrong with the livemount, stopping here"
     fi
 
-    # mount with -owners off to perform complicated FS ops without root, later
-    # we can chown everything to root.
-    if ! hdiutil attach -owners off -mountpoint "${livemount}" "${ramdisk}"; then
+    # Mount with owners off so the invoking user can restructure the image.
+    # fix_perms.sh remounts with real ownership and fixes the numeric IDs later.
+    if ! dmg_attach "${ramdisk}" "${livemount}" off; then
         rmdir "${livemount}"
         die "mount failed"
     fi
 
     echo "mounted ${ramdisk} on ${livemount}"
-    trap 'hdiutil detach ${livemount}; rmdir ${livemount}' EXIT
+    trap 'dmg_detach "${livemount}"; rmdir "${livemount}"' EXIT
 
     if [[ -d "${livemount}/System/Library/LaunchDaemons.old" ]]; then
         echo "already patched"
         return
+    fi
+
+    local sign_cmd hash_cmd
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        sign_cmd=(codesign -s -)
+        hash_cmd=(codesign -d -vvv)
+    else
+        sign_cmd=(ldid -Cadhoc -S)
+        hash_cmd=(ldid -h)
     fi
 
     mv "${livemount}/System/Library/LaunchDaemons" "${livemount}/System/Library/LaunchDaemons.old"
@@ -205,10 +230,10 @@ patch_ramdisk() {
                 exit 1
             fi
 
-            ditto "${IOS_SYSROOT}/bin" "${livemount}/bin"
-            ditto "${IOS_SYSROOT}/libexec" "${livemount}/libexec"
+            copy_tree "${IOS_SYSROOT}/bin" "${livemount}/bin"
+            copy_tree "${IOS_SYSROOT}/libexec" "${livemount}/libexec"
             echo "signing binaries..."
-            find "${livemount}/bin" -type f -exec codesign -s - {} \;
+            find "${livemount}/bin" -type f -exec "${sign_cmd[@]}" {} \;
             ;;
         'macosx')
             cp "${MAC_PLIST}" "${livemount}/System/Library/LaunchDaemons"
@@ -219,7 +244,7 @@ patch_ramdisk() {
     esac
 
     echo "building trustcache..."
-    find "${livemount}" -type f -exec codesign -d -vvv {} \; 2>&1 | grep -i cdhash= | cut -d= -f2- > "${FW_DIR}/all_hashes"
+    find "${livemount}" -type f -exec "${hash_cmd[@]}" {} \; 2>&1 | grep -i cdhash= | cut -d= -f2- > "${FW_DIR}/all_hashes"
     "${BUILD_TC}" "${FW_DIR}/all_hashes" "${FW_DIR}/ramdisk.tc"
 }
 
