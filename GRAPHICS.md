@@ -10,12 +10,14 @@ step is testable without requiring a complete Apple GPU implementation.
 ## Milestone 1: XNU boot framebuffer
 
 `patches/qemu-sptm/0001-darwin-boot-framebuffer.patch` adds an opt-in early framebuffer to the
-pinned `qemu-sptm` revision.
+pinned `qemu-sptm` revision. `0002-darwin-select-graphics-console.patch` selects XNU's bootloader
+graphics mode so `PE_create_console()` actually initializes the framebuffer-backed video console.
 
 The patched Darwin machine:
 
 - reserves a 1280×720×32-bit framebuffer inside XNU's boot-data region;
 - passes that physical address through `boot_args.Video`;
+- sets `Boot_Video.v_display` to the bootloader graphics-mode value (`1`);
 - uses the ARM64 XNU boot-console pixel layout (`0x00RRGGBB`, B/G/R/X bytes in little endian);
 - maps the same guest RAM into a QEMU `DisplaySurface`;
 - refreshes the QEMU display from that shared RAM;
@@ -33,10 +35,20 @@ Keep using the known-good serial workflow with:
 ./run.sh
 ```
 
-Open the framebuffer window while retaining the serial monitor with:
+Open the framebuffer window with:
 
 ```bash
 GRAPHICS=1 ./run.sh
+```
+
+The normal serial boot uses `serial=3 -noprogress`. XNU switches its active console to the UART when
+serial output is requested, and `-noprogress` suppresses framebuffer boot graphics. Therefore, when
+`GRAPHICS=1` is used without an explicit `BOOT_ARGS`, `run.sh` drops those two settings and keeps
+verbose mode enabled so XNU can paint boot output into the framebuffer. You can still override the
+complete command line for experiments, for example:
+
+```bash
+GRAPHICS=1 BOOT_ARGS="rd=md0 -v wdt=-1 wlan-olyhal-abort" ./run.sh
 ```
 
 This is an **early boot framebuffer**, not GPU emulation. It is meant to prove the entire
