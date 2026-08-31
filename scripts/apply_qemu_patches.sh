@@ -12,7 +12,7 @@ die() {
 }
 
 [[ -d "${QEMU_DIR}/.git" || -f "${QEMU_DIR}/.git" ]] ||
-    die "qemu-sptm submodule is not initialized; run: git submodule update --init --recursive"
+    die "qemu-sptm submodule is not initialized; run: git submodule update --init qemu-sptm"
 
 actual_rev="$(git -C "${QEMU_DIR}" rev-parse HEAD)"
 if [[ "${actual_rev}" != "${EXPECTED_QEMU_REV}" ]]; then
