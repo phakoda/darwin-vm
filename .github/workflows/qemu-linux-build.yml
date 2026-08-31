@@ -7,6 +7,7 @@ on:
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
+      - "tests/**"
       - ".github/workflows/qemu-linux-build.yml"
   push:
     branches:
@@ -16,6 +17,7 @@ on:
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
+      - "tests/**"
       - ".github/workflows/qemu-linux-build.yml"
 
 jobs:
@@ -26,6 +28,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
+      - name: Validate host scripts and run arguments
+        run: |
+          bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
+          bash tests/test_run_args.sh
 
       - name: Install QEMU build dependencies
         run: |
