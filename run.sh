@@ -3,9 +3,15 @@ set -euo pipefail
 
 FIRMWARE_DIR="${FIRMWARE_DIR:-firmware}"
 QEMU="${QEMU:-qemu-sptm/build/qemu-system-aarch64}"
-BOOT_ARGS="${BOOT_ARGS:-rd=md0 serial=3 -v -noprogress wdt=-1 wlan-olyhal-abort}"
 GRAPHICS="${GRAPHICS:-0}"
 AIC_V1="${AIC_V1:-0}"
+
+if [[ -n "${BOOT_ARGS+x}" ]]; then
+    BOOT_ARGS_EXPLICIT=1
+else
+    BOOT_ARGS_EXPLICIT=0
+    BOOT_ARGS="rd=md0 serial=3 -v -noprogress wdt=-1 wlan-olyhal-abort"
+fi
 
 fix_tty() {
     stty sane 2>/dev/null || true
@@ -23,13 +29,24 @@ enabled() {
 }
 
 boot_qemu() {
-    machine="darwin"
+    local machine="darwin"
 
     if enabled "${AIC_V1}"; then
         machine+=",aic-v1=on"
     fi
 
+    if enabled "${GRAPHICS}"; then
+        machine+=",boot-fb=on"
+        # serial=3 switches XNU's active console to the UART and -noprogress
+        # suppresses framebuffer boot graphics. Prefer XNU's video console
+        # unless the caller supplied a complete BOOT_ARGS override.
+        if ((BOOT_ARGS_EXPLICIT == 0)); then
+            BOOT_ARGS="rd=md0 -v wdt=-1 wlan-olyhal-abort"
+        fi
+    fi
+
     args=(
+        -M        "${machine}"
         -bootkc   "${FIRMWARE_DIR}/bootkc"
         -dtree    "${FIRMWARE_DIR}/dtree"
         -tc       "${FIRMWARE_DIR}/ramdisk.tc"
@@ -39,11 +56,8 @@ boot_qemu() {
         -m        8G
     )
 
-    if enabled "${GRAPHICS}"; then
-        machine+=",boot-fb=on"
-        args=(-M "${machine}" "${args[@]}")
-    else
-        args=(-M "${machine}" "${args[@]}" -nographic)
+    if ! enabled "${GRAPHICS}"; then
+        args+=(-nographic)
     fi
 
     if [[ -f "${FIRMWARE_DIR}/sptm" ]]; then

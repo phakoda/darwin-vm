@@ -5,8 +5,10 @@ on:
     paths:
       - "patches/qemu-sptm/**"
       - "scripts/apply_qemu_patches.sh"
+      - "scripts/probe_graphics_support.sh"
       - "build_qemu.sh"
       - "run.sh"
+      - "tests/**"
       - ".github/workflows/qemu-linux-build.yml"
   push:
     branches:
@@ -15,8 +17,10 @@ on:
     paths:
       - "patches/qemu-sptm/**"
       - "scripts/apply_qemu_patches.sh"
+      - "scripts/probe_graphics_support.sh"
       - "build_qemu.sh"
       - "run.sh"
+      - "tests/**"
       - ".github/workflows/qemu-linux-build.yml"
 
 jobs:
@@ -27,6 +31,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
+      - name: Validate host scripts and run arguments
+        run: |
+          bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh scripts/probe_graphics_support.sh
+          bash tests/test_run_args.sh
+          printf 'AppleParavirtGPU\0AppleParavirtDisplay\0IOSurface\0' > /tmp/pvg-probe.bin
+          ./scripts/probe_graphics_support.sh /tmp/pvg-probe.bin | grep -F "Reims candidate: yes"
 
       - name: Install QEMU build dependencies
         run: |
