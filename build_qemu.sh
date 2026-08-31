@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QEMU_DIR="${ROOT_DIR}/qemu-sptm"
 BUILD_DIR="${QEMU_DIR}/build"
 
-git -C "${ROOT_DIR}" submodule update --init --recursive
+git -C "${ROOT_DIR}" submodule update --init qemu-sptm
 "${ROOT_DIR}/scripts/apply_qemu_patches.sh"
 
 mkdir -p "${BUILD_DIR}"
