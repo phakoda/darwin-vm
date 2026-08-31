@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "patches/qemu-sptm/**"
+      - "qemu-overlays/**"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -15,6 +16,7 @@ on:
       - "aic-*"
     paths:
       - "patches/qemu-sptm/**"
+      - "qemu-overlays/**"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
