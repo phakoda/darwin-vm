@@ -1,0 +1,465 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: darwin-vm contributors <noreply@example.com>
+Date: Mon, 31 Aug 2026 14:30:00 -0400
+Subject: [PATCH] hw/arm: add opt-in Apple AIC v1 interrupt delivery
+
+The darwin machine currently backs the Apple Interrupt Controller with zeroed
+RAM. That is enough for timer-FIQ/serial bring-up, but ordinary devices have no
+way to interrupt XNU.
+
+Add a small AIC v1 sysbus device implementing the pieces needed for level IRQs:
+INFO/WHOAMI, target routing for the single-CPU machine, SW_SET/SW_CLR,
+MASK_SET/MASK_CLR, HW_STATE, and EVENT's mask-on-delivery behavior. Expose 1024
+QEMU GPIO inputs and one CPU IRQ output.
+
+Keep the device opt-in as -M darwin,aic-v1=on. Non-v1 firmware and the default
+path retain the old zero-filled stub until AIC2/AIC3 are implemented.
+---
+ hw/arm/apple_aic.c         | 246 ++++++++++++++++++++++++++++++++++++++
+ hw/arm/darwin.c            |  51 ++++++--
+ hw/arm/meson.build         |   2 +-
+ include/hw/arm/apple_aic.h |  18 +++
+ 4 files changed, 309 insertions(+), 8 deletions(-)
+ create mode 100644 hw/arm/apple_aic.c
+ create mode 100644 include/hw/arm/apple_aic.h
+
+diff --git a/include/hw/arm/apple_aic.h b/include/hw/arm/apple_aic.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/include/hw/arm/apple_aic.h
+@@ -0,0 +1,18 @@
++#ifndef APPLE_AIC_H
++#define APPLE_AIC_H
++
++#include "hw/core/sysbus.h"
++#include "qom/object.h"
++
++#define TYPE_APPLE_AIC "apple-aic"
++OBJECT_DECLARE_SIMPLE_TYPE(AppleAICState, APPLE_AIC)
++
++#define APPLE_AIC_V1_MAX_IRQS 0x400
++#define APPLE_AIC_V1_MMIO_SIZE 0x8000
++
++/*
++ * Create the single-CPU AIC v1 model and map it at base. The device exposes
++ * APPLE_AIC_V1_MAX_IRQS GPIO inputs and one sysbus IRQ output.
++ */
++DeviceState *apple_aic_create(hwaddr base, uint32_t num_irqs);
++
++#endif /* APPLE_AIC_H */
+diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/hw/arm/apple_aic.c
+@@ -0,0 +1,246 @@
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "hw/arm/apple_aic.h"
++#include "hw/core/irq.h"
++#include "hw/core/qdev.h"
++#include "hw/core/sysbus.h"
++
++#define AIC_INFO                0x0004
++#define AIC_CONFIG              0x0010
++#define AIC_WHOAMI              0x2000
++#define AIC_EVENT               0x2004
++#define AIC_TARGET_CPU          0x3000
++
++#define AIC_EVENT_TYPE_IRQ      1
++
++/*
++ * AIC v1 has space for 0x400 IRQs even when a particular SoC implements
++ * fewer. The bitmap blocks therefore have fixed offsets.
++ */
++#define AIC_BITMAP_WORDS        (APPLE_AIC_V1_MAX_IRQS / 32)
++#define AIC_BITMAP_BYTES        (AIC_BITMAP_WORDS * sizeof(uint32_t))
++#define AIC_SW_SET              0x4000
++#define AIC_SW_CLR              (AIC_SW_SET + AIC_BITMAP_BYTES)
++#define AIC_MASK_SET            (AIC_SW_CLR + AIC_BITMAP_BYTES)
++#define AIC_MASK_CLR            (AIC_MASK_SET + AIC_BITMAP_BYTES)
++#define AIC_HW_STATE            (AIC_MASK_CLR + AIC_BITMAP_BYTES)
++
++struct AppleAICState {
++    SysBusDevice parent_obj;
++
++    MemoryRegion iomem;
++    qemu_irq parent_irq;
++
++    uint32_t num_irqs;
++    uint32_t config;
++    uint32_t target_cpu[APPLE_AIC_V1_MAX_IRQS];
++    uint32_t hw_pending[AIC_BITMAP_WORDS];
++    uint32_t sw_pending[AIC_BITMAP_WORDS];
++    uint32_t masked[AIC_BITMAP_WORDS];
++};
++
++static inline uint32_t aic_word(unsigned int irq)
++{
++    return irq >> 5;
++}
++
++static inline uint32_t aic_bit(unsigned int irq)
++{
++    return 1U << (irq & 31);
++}
++
++static bool apple_aic_has_pending(AppleAICState *s)
++{
++    uint32_t words = DIV_ROUND_UP(s->num_irqs, 32);
++    uint32_t i;
++
++    for (i = 0; i < words; i++) {
++        if ((s->hw_pending[i] | s->sw_pending[i]) & ~s->masked[i]) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void apple_aic_update(AppleAICState *s)
++{
++    qemu_set_irq(s->parent_irq, apple_aic_has_pending(s));
++}
++
++static uint32_t apple_aic_next_event(AppleAICState *s)
++{
++    uint32_t irq;
++
++    for (irq = 0; irq < s->num_irqs; irq++) {
++        uint32_t word = aic_word(irq);
++        uint32_t bit = aic_bit(irq);
++
++        if (((s->hw_pending[word] | s->sw_pending[word]) &
++             ~s->masked[word] & bit) == 0) {
++            continue;
++        }
++
++        /* AIC automatically masks a delivered IRQ until EOI/unmask. */
++        s->masked[word] |= bit;
++        apple_aic_update(s);
++        return (AIC_EVENT_TYPE_IRQ << 16) | irq;
++    }
++
++    return 0;
++}
++
++static bool apple_aic_bitmap_offset(hwaddr offset, hwaddr base,
++                                    uint32_t *word)
++{
++    if (offset < base || offset >= base + AIC_BITMAP_BYTES ||
++        (offset & 3)) {
++        return false;
++    }
++
++    *word = (offset - base) >> 2;
++    return true;
++}
++
++static uint64_t apple_aic_read(void *opaque, hwaddr offset, unsigned size)
++{
++    AppleAICState *s = APPLE_AIC(opaque);
++    uint32_t word;
++
++    switch (offset) {
++    case AIC_INFO:
++        return s->num_irqs;
++    case AIC_CONFIG:
++        return s->config;
++    case AIC_WHOAMI:
++        return 0;
++    case AIC_EVENT:
++        return apple_aic_next_event(s);
++    default:
++        break;
++    }
++
++    if (offset >= AIC_TARGET_CPU &&
++        offset < AIC_TARGET_CPU + APPLE_AIC_V1_MAX_IRQS * sizeof(uint32_t) &&
++        !(offset & 3)) {
++        return s->target_cpu[(offset - AIC_TARGET_CPU) >> 2];
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_SW_SET, &word) ||
++        apple_aic_bitmap_offset(offset, AIC_SW_CLR, &word)) {
++        return s->sw_pending[word];
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_MASK_SET, &word) ||
++        apple_aic_bitmap_offset(offset, AIC_MASK_CLR, &word)) {
++        return s->masked[word];
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_HW_STATE, &word)) {
++        return s->hw_pending[word];
++    }
++
++    return 0;
++}
++
++static void apple_aic_write(void *opaque, hwaddr offset, uint64_t value,
++                            unsigned size)
++{
++    AppleAICState *s = APPLE_AIC(opaque);
++    uint32_t word;
++    uint32_t value32 = value;
++
++    if (offset == AIC_CONFIG) {
++        s->config = value32;
++        return;
++    }
++
++    if (offset >= AIC_TARGET_CPU &&
++        offset < AIC_TARGET_CPU + APPLE_AIC_V1_MAX_IRQS * sizeof(uint32_t) &&
++        !(offset & 3)) {
++        /* darwin-vm currently has one CPU; bit 0 is the only useful target. */
++        s->target_cpu[(offset - AIC_TARGET_CPU) >> 2] = value32 & 1;
++        return;
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_SW_SET, &word)) {
++        s->sw_pending[word] |= value32;
++        apple_aic_update(s);
++        return;
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_SW_CLR, &word)) {
++        s->sw_pending[word] &= ~value32;
++        apple_aic_update(s);
++        return;
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_MASK_SET, &word)) {
++        s->masked[word] |= value32;
++        apple_aic_update(s);
++        return;
++    }
++
++    if (apple_aic_bitmap_offset(offset, AIC_MASK_CLR, &word)) {
++        s->masked[word] &= ~value32;
++        apple_aic_update(s);
++    }
++}
++
++static void apple_aic_set_irq(void *opaque, int irq, int level)
++{
++    AppleAICState *s = APPLE_AIC(opaque);
++    uint32_t word;
++    uint32_t bit;
++
++    if (irq < 0 || irq >= s->num_irqs) {
++        return;
++    }
++
++    word = aic_word(irq);
++    bit = aic_bit(irq);
++    if (level) {
++        s->hw_pending[word] |= bit;
++    } else {
++        s->hw_pending[word] &= ~bit;
++    }
++    apple_aic_update(s);
++}
++
++static const MemoryRegionOps apple_aic_ops = {
++    .read = apple_aic_read,
++    .write = apple_aic_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = {
++        .min_access_size = 4,
++        .max_access_size = 4,
++    },
++};
++
++static void apple_aic_init(Object *obj)
++{
++    AppleAICState *s = APPLE_AIC(obj);
++    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++    uint32_t i;
++
++    s->num_irqs = APPLE_AIC_V1_MAX_IRQS;
++    for (i = 0; i < AIC_BITMAP_WORDS; i++) {
++        s->masked[i] = UINT32_MAX;
++    }
++    for (i = 0; i < APPLE_AIC_V1_MAX_IRQS; i++) {
++        s->target_cpu[i] = 1;
++    }
++
++    memory_region_init_io(&s->iomem, obj, &apple_aic_ops, s,
++                          TYPE_APPLE_AIC, APPLE_AIC_V1_MMIO_SIZE);
++    sysbus_init_mmio(sbd, &s->iomem);
++    sysbus_init_irq(sbd, &s->parent_irq);
++    qdev_init_gpio_in(DEVICE(obj), apple_aic_set_irq,
++                      APPLE_AIC_V1_MAX_IRQS);
++}
++
++static const TypeInfo apple_aic_info = {
++    .name = TYPE_APPLE_AIC,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(AppleAICState),
++    .instance_init = apple_aic_init,
++};
++
++static void apple_aic_register_types(void)
++{
++    type_register_static(&apple_aic_info);
++}
++
++type_init(apple_aic_register_types)
++
++DeviceState *apple_aic_create(hwaddr base, uint32_t num_irqs)
++{
++    DeviceState *dev;
++    AppleAICState *s;
++    SysBusDevice *sbd;
++
++    if (num_irqs == 0 || num_irqs > APPLE_AIC_V1_MAX_IRQS) {
++        error_report("invalid AIC v1 IRQ count: %u", num_irqs);
++        exit(1);
++    }
++
++    dev = qdev_new(TYPE_APPLE_AIC);
++    s = APPLE_AIC(dev);
++    s->num_irqs = num_irqs;
++    sbd = SYS_BUS_DEVICE(dev);
++    sysbus_realize_and_unref(sbd, &error_fatal);
++    sysbus_mmio_map(sbd, 0, base);
++
++    return dev;
++}
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 2a21540..3333333 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -220,7 +220,7 @@ hw_common_arch += {'arm': arm_common_ss}
+ 
+-arm_common_ss.add(files('darwin.c', 'xnuboot_sptm.c', 'xnu_patch.c', 'apple_regs.c', 'apple_dtree.c', 'apple_amcc.c', 'macho.c'))
++arm_common_ss.add(files('darwin.c', 'xnuboot_sptm.c', 'xnu_patch.c', 'apple_regs.c', 'apple_dtree.c', 'apple_amcc.c', 'apple_aic.c', 'macho.c'))
+ 
+ arm_common_ss.add(custom_target('apple_regs_autogen.h',
+   output: 'apple_regs_autogen.h',
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index 0000000..4444444 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -21,6 +21,7 @@
+ #include "xnu/apple_dtree.h"
+ #include "xnu/apple_regs.h"
+ #include "hw/arm/apple_amcc.h"
++#include "hw/arm/apple_aic.h"
+ #include "xnu/patch.h"
+ #include "xnu/macho.h"
+ 
+@@ -47,6 +48,8 @@ struct DarwinState {
+     struct xnu_boot_info bootinfo;
+     QemuConsole *con;
+     DisplaySurface *fb_surface;
++    DeviceState *aic;
++    bool aic_v1;
+ };
+ 
+ MACHINE_CLASS_ARG(bootkc);
+@@ -58,6 +61,18 @@ MACHINE_CLASS_ARG(tc);
+ MACHINE_CLASS_ARG(ramdisk);
+ 
++static bool darwin_get_aic_v1(Object *obj, Error **errp)
++{
++    DarwinState *s = DARWIN_MACHINE(obj);
++    return s->aic_v1;
++}
++
++static void darwin_set_aic_v1(Object *obj, bool value, Error **errp)
++{
++    DarwinState *s = DARWIN_MACHINE(obj);
++    s->aic_v1 = value;
++}
++
+ static bool darwin_get_boot_fb(Object *obj, Error **errp)
+ {
+     DarwinState *s = DARWIN_MACHINE(obj);
+@@ -151,10 +166,10 @@ static void init_sep(struct dtree_node *dt_root) {
+     alloc_zeroed("sep", sep_reg[0].base, sep_reg[0].len);
+ }
+ 
+-static void init_aic(struct dtree_node *dt_root, uint64_t iobase) {
++static DeviceState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
++                             bool functional_v1) {
+     // This is a bare-bones aic implementation that ignores all register reads/
+     // writes, and simply reports the correct number of IRQs
+     struct dtree_node *aic = adt_find_node(dt_root, "arm-io/aic");
+@@ -162,19 +177,31 @@ static void init_aic(struct dtree_node *dt_root, uint64_t iobase) {
+ 
+     uint64_t base = aic_reg[0].base + iobase;
+-    alloc_zeroed("aic", base, aic_reg[0].len);
+ 
+     int aic_vers = -1;
+     sscanf(adt_get_prop_val(aic, "compatible"), "aic,%d", &aic_vers);
+ 
+     uint32_t num_irqs = 0;
+     switch (aic_vers) {
+         case 1:
+             // aic,1 needs register +0x04 from first iobase to report the number of interrupts
+             // This is always 8x the size of the ipid-mask for this device
+             num_irqs = 8 * adt_get_prop_len(aic, "ipid-mask");
++            if (functional_v1) {
++                if (aic_reg[0].len < APPLE_AIC_V1_MMIO_SIZE) {
++                    fprintf(stderr,
++                            "error: AIC v1 MMIO region is too small for functional emulation\n");
++                    exit(1);
++                }
++                return apple_aic_create(base, num_irqs);
++            }
++            alloc_zeroed("aic", base, aic_reg[0].len);
+             address_space_write(&address_space_memory, base + 0x4, MEMTXATTRS_UNSPECIFIED, &num_irqs, sizeof(num_irqs));
+             break;
+ 
+         case 2:
+         case 3:
++            alloc_zeroed("aic", base, aic_reg[0].len);
+             // aic,2 and aic,3 have num irqs at +0xC
+             num_irqs = A_GOOD_NUMBER_OF_IRQS;
+             address_space_write(&address_space_memory, base + 0xC, MEMTXATTRS_UNSPECIFIED, &num_irqs, sizeof(num_irqs));
+@@ -184,6 +211,8 @@ static void init_aic(struct dtree_node *dt_root, uint64_t iobase) {
+             fprintf(stderr, "warning: unsupported AIC, this will probably not work\n");
+             break;
+     }
++
++    return NULL;
+ }
+ 
+ static void setup_mte(Object *cpuobj, MachineState *machine, struct xnu_boot_info *info) {
+@@ -354,7 +383,7 @@ static void darwin_init(MachineState *ms) {
+     assert(0 == arm_io_ranges[0]); // child bus phys addr must be zero
+ 
+     init_uart(dt_root, iobase);
+-    init_aic(dt_root, iobase);
++    s->aic = init_aic(dt_root, iobase, s->aic_v1);
+     init_sep(dt_root);
+     init_cpu_impl(dt_root);
+ 
+@@ -364,6 +393,10 @@ static void darwin_init(MachineState *ms) {
+ 
+     qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
+ 
++    if (s->aic) {
++        sysbus_connect_irq(SYS_BUS_DEVICE(s->aic), 0,
++                           qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
++    }
+     // On Apple Si, FIQ is hardwired to platform timer
+     qdev_connect_gpio_out(cpudev, GTIMER_HYPVIRT, qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
+ 
+@@ -402,6 +435,11 @@ static void darwin_machine_class_init(ObjectClass *oc, const void *data) {
+     object_class_property_add_str(oc, "tc", tc_darwin_class_get, tc_darwin_class_set);
+     object_class_property_add_str(oc, "ramdisk", ramdisk_darwin_class_get, ramdisk_darwin_class_set);
+ 
++    object_class_property_add_bool(oc, "aic-v1",
++                                   darwin_get_aic_v1,
++                                   darwin_set_aic_v1);
++    object_class_property_set_description(
++        oc, "aic-v1", "Use functional Apple AIC v1 interrupt emulation");
+     object_class_property_add_bool(oc, "boot-fb",
+                                    darwin_get_boot_fb,
+                                    darwin_set_boot_fb);
+-- 
+2.43.0

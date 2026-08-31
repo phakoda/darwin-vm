@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - "display-*"
+      - "reims-*"
     paths:
       - "patches/qemu-sptm/**"
       - "scripts/apply_qemu_patches.sh"
@@ -57,7 +58,8 @@ jobs:
       - name: Build Darwin QEMU
         run: ninja -C qemu-sptm/build qemu-system-aarch64
 
-      - name: Verify Darwin framebuffer machine property
+      - name: Verify Darwin emulator machine properties
         run: |
-          qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1 \
-            | grep -F "boot-fb"
+          machine_help="$(qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1)"
+          grep -F "boot-fb" <<<"${machine_help}"
+          grep -F "aic-v1" <<<"${machine_help}"

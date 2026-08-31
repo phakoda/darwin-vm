@@ -5,13 +5,29 @@ FIRMWARE_DIR="${FIRMWARE_DIR:-firmware}"
 QEMU="${QEMU:-qemu-sptm/build/qemu-system-aarch64}"
 BOOT_ARGS="${BOOT_ARGS:-rd=md0 serial=3 -v -noprogress wdt=-1 wlan-olyhal-abort}"
 GRAPHICS="${GRAPHICS:-0}"
+AIC_V1="${AIC_V1:-0}"
 
 fix_tty() {
     stty sane 2>/dev/null || true
 }
 
+enabled() {
+    case "$1" in
+        1|on|true|yes) return 0 ;;
+        0|off|false|no) return 1 ;;
+        *)
+            echo "error: expected 0/1, off/on, false/true, or no/yes; got '$1'" >&2
+            exit 1
+            ;;
+    esac
+}
+
 boot_qemu() {
     machine="darwin"
+
+    if enabled "${AIC_V1}"; then
+        machine+=",aic-v1=on"
+    fi
 
     args=(
         -bootkc   "${FIRMWARE_DIR}/bootkc"
@@ -23,19 +39,12 @@ boot_qemu() {
         -m        8G
     )
 
-    case "${GRAPHICS}" in
-        0|off|false|no)
-            args=(-M "${machine}" "${args[@]}" -nographic)
-            ;;
-        1|on|true|yes)
-            machine+=",boot-fb=on"
-            args=(-M "${machine}" "${args[@]}")
-            ;;
-        *)
-            echo "error: GRAPHICS must be 0/1, off/on, false/true, or no/yes" >&2
-            exit 1
-            ;;
-    esac
+    if enabled "${GRAPHICS}"; then
+        machine+=",boot-fb=on"
+        args=(-M "${machine}" "${args[@]}")
+    else
+        args=(-M "${machine}" "${args[@]}" -nographic)
+    fi
 
     if [[ -f "${FIRMWARE_DIR}/sptm" ]]; then
         args+=(
