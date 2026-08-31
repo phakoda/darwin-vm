@@ -1,0 +1,278 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: darwin-vm contributors <noreply@example.com>
+Date: Mon, 31 Aug 2026 12:00:00 -0400
+Subject: [PATCH] hw/arm/darwin: expose XNU boot framebuffer
+
+Reserve a framebuffer inside XNU's boot-data region, advertise it through
+boot_args.Video, and expose the same guest RAM through a QEMU graphics
+console.  The feature is opt-in with -M darwin,boot-fb=on so the existing
+serial-only boot remains unchanged.
+
+The initial framebuffer is deliberately simple: 1280x720, 32-bit
+0x00RRGGBB (B,G,R,X in little-endian memory), matching XNU's built-in ARM64
+video console format.  This is an early boot console, not AGX emulation.
+---
+ hw/arm/darwin.c          | 84 +++++++++++++++++++++++++++++++++++++++++
+ hw/arm/xnuboot_sptm.c    | 49 +++++++++++++++++++++++-
+ include/xnu/boot/xnuboot.h | 12 ++++++
+ 3 files changed, 150 insertions(+), 1 deletion(-)
+
+diff --git a/include/xnu/boot/xnuboot.h b/include/xnu/boot/xnuboot.h
+index 2c4c01e..0000000 100644
+--- a/include/xnu/boot/xnuboot.h
++++ b/include/xnu/boot/xnuboot.h
+@@ -18,6 +18,13 @@
+ #define ROUND_NEXT_PAGE(x)         (( ROUND_UP_POW2( ((x)), ( (( DARWIN_PAGE_SIZE )) )) ))
+ #define XNU_STRIP_VMA(x)           (( ((x)) & ((BIT(35)-1)) ))
+ 
++#define DARWIN_BOOT_FB_WIDTH        1280
++#define DARWIN_BOOT_FB_HEIGHT       720
++#define DARWIN_BOOT_FB_DEPTH        32
++#define DARWIN_BOOT_FB_ROW_BYTES    (DARWIN_BOOT_FB_WIDTH * (DARWIN_BOOT_FB_DEPTH / 8))
++#define DARWIN_BOOT_FB_SIZE         \
++    ROUND_NEXT_PAGE(DARWIN_BOOT_FB_ROW_BYTES * DARWIN_BOOT_FB_HEIGHT)
++
+ typedef uint64_t usize;
+ typedef uint64_t u64;
+ typedef uint32_t u32;
+@@ -42,7 +49,11 @@ struct xnu_boot_info {
+ 
+     uint64_t dram_base, dram_size;
+     bool has_mte;
++    bool boot_fb;
++
++    hwaddr fb_base;
++    size_t fb_size;
+ 
+     // Feedback from the kernel loader back to the darwin machine to boot during reset
+     hwaddr  init_pc, init_x0;
+ };
+diff --git a/hw/arm/xnuboot_sptm.c b/hw/arm/xnuboot_sptm.c
+index b96d421..0000000 100644
+--- a/hw/arm/xnuboot_sptm.c
++++ b/hw/arm/xnuboot_sptm.c
+@@ -58,6 +58,43 @@ static trust_cache_offsets_t get_tcinfo(void) {
+     };
+ }
+ 
++static void reserve_boot_framebuffer(struct xnu_boot_info *info, hwaddr *head)
++{
++    if (!info->boot_fb) {
++        return;
++    }
++
++    *head = ROUND_NEXT_PAGE(*head);
++    info->fb_base = *head;
++    info->fb_size = DARWIN_BOOT_FB_SIZE;
++    *head = ROUND_NEXT_PAGE(*head + info->fb_size);
++
++    if (*head > info->dram_base + info->dram_size) {
++        fprintf(stderr, "boot framebuffer does not fit in guest DRAM\n");
++        exit(1);
++    }
++}
++
++static void configure_boot_video(boot_args *args,
++                                 struct xnu_boot_info *info)
++{
++    if (!info->boot_fb) {
++        return;
++    }
++
++    /*
++     * XNU treats bit 0 of v_baseAddr as "this is a physical address" and
++     * maps the framebuffer itself.  Keep v_display=0 for the first milestone
++     * so PE_create_console() selects the built-in text console.
++     */
++    args->Video.v_baseAddr = info->fb_base | 1;
++    args->Video.v_display = 0;
++    args->Video.v_rowBytes = DARWIN_BOOT_FB_ROW_BYTES;
++    args->Video.v_width = DARWIN_BOOT_FB_WIDTH;
++    args->Video.v_height = DARWIN_BOOT_FB_HEIGHT;
++    args->Video.v_depth = DARWIN_BOOT_FB_DEPTH;
++}
++
+ // Push something from the "blob" into the ADT map
+ static void push_adt_mmap(struct dtree_node *memory_map, const char *reg_name, hwaddr *paddr, hwaddr *last_map_entry) {
+     assert(0 == ((*paddr) & (PAGE_SIZE-1)));
+@@ -313,6 +345,8 @@ static void arm_load_xnu_sptm(ARMCPU *cpu, MachineState *ms, struct xnu_boot_in
+         blob_head = ROUND_NEXT_PAGE(blob_head);
+         END_ENTRY("RAMDisk");
+     }
++    reserve_boot_framebuffer(info, &blob_head);
++
+ #undef PUSH_SEG
+ #undef END_ENTRY
+ #undef SKIP
+@@ -353,6 +387,7 @@ static void arm_load_xnu_sptm(ARMCPU *cpu, MachineState *ms, struct xnu_boot_in
+     args.deviceTreeP = dtree_base_phys - args.physBase + args.virtBase;
+     args.deviceTreeLength = info->dtree_f.len;
+     g_strlcpy(args.CommandLine, info->args, BOOT_LINE_LENGTH);
++    configure_boot_video(&args, info);
+ 
+ #ifdef DEBUG_MEMORY_LAYOUT
+     uint64_t sptm_load = args.virtBase - args.physBase + sptm_mi.physlo;
+@@ -420,6 +455,7 @@ static void arm_load_xnu_nosptm(ARMCPU *cpu, MachineState *ms, struct xnu_boot_
+     hwaddr args_base_phys  = info->dram_base + XNU_STRIP_VMA(bkc_mi.virthi);
+     hwaddr dtree_base_phys = ROUND_NEXT_PAGE(args_base_phys + sizeof(boot_args));
+     hwaddr rd_base_phys = ROUND_NEXT_PAGE(dtree_base_phys + info->dtree_f.len);
++    hwaddr kernel_data_end = rd_base_phys + ROUND_NEXT_PAGE(info->ramdisk_f.len);
+ 
+     assert(xnu_load_phys >= tc_base_phys + info->tc_f.len);
+     assert(args_base_phys >= xnu_load_phys + bkc_mi.virthi - bkc_mi.virtlo);
+@@ -435,6 +471,10 @@ static void arm_load_xnu_nosptm(ARMCPU *cpu, MachineState *ms, struct xnu_boot_
+     struct dtree_node *map = adt_find_node((struct dtree_node*)info->dtree_f.buf, "chosen/memory-map");
+     set_adt_mmap(map, "TrustCache", tc_base_phys, info->tc_f.len + sizeof(trust_cache_offsets_t));
+     set_adt_mmap(map, "RAMDisk", rd_base_phys, info->ramdisk_f.len);
++
++    reserve_boot_framebuffer(info, &kernel_data_end);
++    assert(kernel_data_end <= info->dram_base + info->dram_size);
++
+     boot_args args = {0};
+     args.Revision = kBootArgsRevision2;
+     args.Version = kBootArgsVersion2;
+@@ -442,10 +483,11 @@ static void arm_load_xnu_nosptm(ARMCPU *cpu, MachineState *ms, struct xnu_boot_
+     args.virtBase = STRIP_L2_PT_INDEX(bkc_mi.virtlo);
+     args.physBase = info->dram_base;
+     args.memSize = info->dram_size;
+-    args.topOfKernelData = rd_base_phys + ROUND_NEXT_PAGE(info->ramdisk_f.len);
++    args.topOfKernelData = kernel_data_end;
+     args.deviceTreeP = dtree_base_phys - args.physBase + args.virtBase;
+     args.deviceTreeLength = info->dtree_f.len;
+     g_strlcpy(args.CommandLine, info->args, BOOT_LINE_LENGTH);
++    configure_boot_video(&args, info);
+ 
+     assert(args.topOfKernelData > bkc_mi.physlo + (bkc_mi.virthi - bkc_mi.virtlo));
+ 
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index 0000000..0000000 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -6,6 +6,9 @@
+ #include "qom/object.h"
+ #include "system/address-spaces.h"
++#include "system/physmem.h"
+ #include "system/reset.h"
++#include "ui/console.h"
++#include "ui/qemu-pixman.h"
+ #include "exec/memattrs.h"
+ #include "qemu/module.h"
+ #include "qemu/option.h"
+@@ -38,6 +41,8 @@ struct DarwinState {
+     MachineState parent_obj;
+     ARMCPU *cpu;
+     struct xnu_boot_info bootinfo;
++    QemuConsole *con;
++    DisplaySurface *fb_surface;
+ };
+ 
+ MACHINE_CLASS_ARG(bootkc);
+@@ -48,6 +53,87 @@ MACHINE_CLASS_ARG(txm);
+ MACHINE_CLASS_ARG(tc);
+ MACHINE_CLASS_ARG(ramdisk);
+ 
++static bool darwin_get_boot_fb(Object *obj, Error **errp)
++{
++    DarwinState *s = DARWIN_MACHINE(obj);
++    return s->bootinfo.boot_fb;
++}
++
++static void darwin_set_boot_fb(Object *obj, bool value, Error **errp)
++{
++    DarwinState *s = DARWIN_MACHINE(obj);
++    s->bootinfo.boot_fb = value;
++}
++
++static void darwin_fb_unmap_display_surface(pixman_image_t *image,
++                                            void *unused)
++{
++    void *data = pixman_image_get_data(image);
++    uint32_t size = pixman_image_get_stride(image) *
++                    pixman_image_get_height(image);
++    physical_memory_unmap(data, size, false, 0);
++}
++
++static DisplaySurface *darwin_fb_create_surface(hwaddr addr, hwaddr size)
++{
++    DisplaySurface *surface;
++    hwaddr mapsize = size;
++    void *data;
++
++    data = physical_memory_map(addr, &mapsize, false);
++    if (!data || mapsize != size) {
++        if (data) {
++            physical_memory_unmap(data, mapsize, false, 0);
++        }
++        return NULL;
++    }
++
++    surface = qemu_create_displaysurface_from(
++        DARWIN_BOOT_FB_WIDTH,
++        DARWIN_BOOT_FB_HEIGHT,
++        PIXMAN_x8r8g8b8,
++        DARWIN_BOOT_FB_ROW_BYTES,
++        data
++    );
++    pixman_image_set_destroy_function(surface->image,
++                                      darwin_fb_unmap_display_surface,
++                                      NULL);
++    return surface;
++}
++
++static bool darwin_fb_update(void *opaque)
++{
++    DarwinState *s = DARWIN_MACHINE((MachineState *)opaque);
++
++    if (s->fb_surface) {
++        qemu_console_set_surface(s->con, s->fb_surface);
++        s->fb_surface = NULL;
++    }
++
++    qemu_console_update_full(s->con);
++    return true;
++}
++
++static const GraphicHwOps darwin_fb_ops = {
++    .gfx_update = darwin_fb_update,
++};
++
++static void init_boot_framebuffer(DarwinState *s)
++{
++    struct xnu_boot_info *info = &s->bootinfo;
++
++    if (!info->boot_fb) {
++        return;
++    }
++
++    s->con = qemu_graphic_console_create(NULL, 0, &darwin_fb_ops, s);
++    s->fb_surface = darwin_fb_create_surface(info->fb_base, info->fb_size);
++    if (!s->fb_surface) {
++        fprintf(stderr, "error: unable to map Darwin boot framebuffer\n");
++        exit(1);
++    }
++}
++
+ static void alloc_zeroed(const char *name, hwaddr pa, size_t len) {
+     if (0 == len) {
+         fprintf(stderr, "error: alloc_ram called with len=0 for region %s\n", name);
+@@ -232,6 +310,7 @@ static void darwin_init(MachineState *ms) {
+     info->dram_size = *(u64*)adt_get_prop_val(chosen_node, "dram-size");
+     s->cpu = ARM_CPU(cpuobj);
+     arm_load_xnu(s->cpu, ms, info);
++    init_boot_framebuffer(s);
+     if (info->has_mte) setup_mte(cpuobj, MACHINE(s), info);
+ 
+     struct dtree_node *amcc_node = adt_find_node(dt_root, "chosen/lock-regs/amcc");
+@@ -283,5 +362,10 @@ static void darwin_machine_class_init(ObjectClass *oc, const void *data) {
+     object_class_property_add_str(oc, "txm", txm_darwin_class_get, txm_darwin_class_set);
+     object_class_property_add_str(oc, "tc", tc_darwin_class_get, tc_darwin_class_set);
+     object_class_property_add_str(oc, "ramdisk", ramdisk_darwin_class_get, ramdisk_darwin_class_set);
++    object_class_property_add_bool(oc, "boot-fb",
++                                   darwin_get_boot_fb,
++                                   darwin_set_boot_fb);
++    object_class_property_set_description(
++        oc, "boot-fb", "Expose an XNU boot framebuffer through QEMU");
+     darwin_machine_init(mc);
+ }
+-- 
+2.43.0
