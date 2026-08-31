@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU_DIR="${ROOT_DIR}/qemu-sptm"
 PATCH_DIR="${ROOT_DIR}/patches/qemu-sptm"
+OVERLAY_DIR="${ROOT_DIR}/qemu-overlays"
 EXPECTED_QEMU_REV="006cc6b174e6177e64d06a6457e4125fd627649f"
 
 die() {
@@ -17,6 +18,21 @@ die() {
 actual_rev="$(git -C "${QEMU_DIR}" rev-parse HEAD)"
 if [[ "${actual_rev}" != "${EXPECTED_QEMU_REV}" ]]; then
     die "qemu-sptm is at ${actual_rev}, expected ${EXPECTED_QEMU_REV}; update the patches before changing the submodule revision"
+fi
+
+# New source files are kept as ordinary files in darwin-vm so they can be
+# reviewed and edited normally. Mirror them into the external QEMU submodule
+# before applying the small integration patches.
+if [[ -d "${OVERLAY_DIR}" ]]; then
+    while IFS= read -r -d '' overlay; do
+        rel="${overlay#${OVERLAY_DIR}/}"
+        dest="${QEMU_DIR}/${rel}"
+        mkdir -p "$(dirname "${dest}")"
+        if ! cmp -s "${overlay}" "${dest}"; then
+            echo "overlay: ${rel}"
+            cp "${overlay}" "${dest}"
+        fi
+    done < <(find "${OVERLAY_DIR}" -type f -print0 | sort -z)
 fi
 
 shopt -s nullglob
