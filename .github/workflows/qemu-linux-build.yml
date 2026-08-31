@@ -12,6 +12,7 @@ on:
   push:
     branches:
       - "display-*"
+      - "aic-*"
     paths:
       - "patches/qemu-sptm/**"
       - "scripts/apply_qemu_patches.sh"
