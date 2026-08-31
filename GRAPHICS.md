@@ -42,9 +42,46 @@ GRAPHICS=1 ./run.sh
 This is an **early boot framebuffer**, not GPU emulation. It is meant to prove the entire
 XNU → guest RAM → QEMU display path and give us visible kernel/boot-console pixels.
 
-## Milestone 2: display/input services
+## Probe the guest graphics stack
 
-After the framebuffer is proven on real firmware:
+Before choosing a GPU implementation for a firmware target, inspect the extracted BootKC:
+
+```bash
+./scripts/probe_graphics_support.sh firmware/bootkc
+```
+
+The probe looks for stock `AppleParavirtGPU` / `AppleParavirtDisplay`, AGX-family, and IOSurface
+markers. It is deliberately a heuristic string scan rather than a kext parser, but a positive PVG
+result is useful evidence that the guest may be able to bind a Reims-compatible paravirtual GPU
+without a custom kernel extension.
+
+This matters because the macOS and iOS paths may diverge: a Mac kernel collection with the stock
+Apple paravirtual drivers can use the PVG protocol, while a target that only ships AGX drivers needs
+AGX emulation or a guest-side compatibility layer.
+
+## Milestone 2: functional device interrupts
+
+The current `darwin` QEMU machine only allocates zeroed memory for Apple's AIC. That is sufficient
+for the existing serial/root-shell bring-up because the platform timer is hard-wired to FIQ, but it
+cannot deliver ordinary device IRQs. A real GPU, network interface, Wi-Fi device, Bluetooth
+controller, keyboard, or pointing device needs a working interrupt path.
+
+The next emulator primitive is therefore a minimal Apple AIC implementation, starting with AIC v1:
+
+- hardware IRQ level state;
+- mask-set / mask-clear registers;
+- software-set / software-clear state;
+- the event register and its automatic mask-on-delivery behavior;
+- one CPU target;
+- an IRQ output wired to the emulated ARM CPU.
+
+AIC2/AIC3 support can then extend the same device model with their per-die register layout. Keeping
+this as a reusable QEMU device is important: Reims, networking, Wi-Fi, Bluetooth and HID should all
+connect to the same interrupt controller rather than inventing one-off notification paths.
+
+## Milestone 3: display/input services
+
+After the framebuffer and interrupt path are proven on real firmware:
 
 1. derive native panel dimensions/rotation/scale from the selected device tree instead of using a
    fixed development resolution;
@@ -53,54 +90,59 @@ After the framebuffer is proven on real firmware:
    keep running rather than falling back to the boot console;
 4. add screenshot and deterministic framebuffer tests to make display regressions observable in CI.
 
-## Milestone 3: accelerated Metal via Vulkan
+## Milestone 4: accelerated Metal via Reims + Vulkan
 
-A full AGX command-processor implementation is a very large reverse-engineering project. A faster
-bring-up path is a paravirtual graphics stack that preserves the guest's high-level Metal behavior
-while executing work through Vulkan on the Linux host.
+A full AGX command-processor implementation is a very large reverse-engineering project. There is
+now a stronger bring-up path than a new Metal API shim: reuse the existing Apple paravirtual GPU
+protocol implemented by Reims where the guest already contains Apple's stock PVG drivers.
 
-[`steelbrain/metal2vulkan`](https://github.com/steelbrain/metal2vulkan) is useful here because it
-translates Metal AIR (LLVM bitcode/sanitized LLVM IR) to Vulkan 1.2 SPIR-V and provides reflection
-for descriptors, stage interfaces, argument buffers, function constants, and conservative buffer
-footprints.
+The relevant upstream projects are:
 
-It does **not** implement Metal.framework, `.metallib` loading, command queues, resources, textures,
-IOSurface, presentation, or the Apple GPU kernel driver. The proposed emulator split is therefore:
+- `steelbrain-bot/reims-vgpu`: a host implementation of the protocol consumed by
+  `AppleParavirtGPU.kext`, with a Vulkan backend and IOSurface/display handling;
+- `steelbrain/qemu-reims-vgpu`: thin QEMU PCI/MMIO device shims that connect guest MMIO/IRQs and
+  guest memory to Reims;
+- `steelbrain/metal2vulkan`: Metal AIR → Vulkan 1.2 SPIR-V translation used by the Vulkan renderer;
+- `steelbrain/experiment-macOS-arm64-on-asahi-linux-arm64`: evidence that this stack can bring an
+  ARM64 macOS guest on Asahi Linux to graphical Setup Assistant/WindowServer using Vulkan.
+
+For `darwin-vm`, the intended Mac-side split is therefore:
 
 ```text
-Darwin app / CoreAnimation / SpringBoard
+macOS app / CoreAnimation / WindowServer
               |
-        Metal API shim
+      Apple Metal / IOSurface stack
               |
-   pipeline state + AIR extraction
-        |                 |
-        |                 +--> metal2vulkan --> SPIR-V
-        |
- shared command/resource ring
+    AppleParavirtGPU + Display
               |
-      QEMU paravirtual GPU
+        PVG MMIO + IRQ protocol
               |
-        host Vulkan 1.2+
+       Reims QEMU thin shim
               |
-        Linux display
+       Reims Vulkan backend
+              |
+ metal2vulkan (AIR -> SPIR-V)
+              |
+          host Vulkan
+              |
+         Linux display
 ```
 
-The guest shim must preserve enough Metal ABI behavior that system frameworks can create devices,
-buffers, textures, render/compute pipelines, command buffers, fences/events, and drawables. The host
-side owns Vulkan objects and presentation. `metal2vulkan` supplies shader translation inside that
-pipeline rather than replacing the pipeline itself.
+This does **not** mean Reims automatically solves iPhone graphics. We first need to probe whether a
+selected iOS kernel collection contains the Apple PVG drivers. If it does not, the iOS path remains
+AGX emulation or an explicit guest compatibility layer.
 
 ### Why keep AGX emulation as a second path?
 
-Some system components may talk to IOGPU/AGX interfaces below Metal.framework or rely on behavior a
-shim cannot reproduce safely. For those cases we should reuse public AGX reverse-engineering work
-(where licensing permits) to model the minimum kernel/user-client ABI. The emulator can then choose
-between:
+Some system components may talk to IOGPU/AGX interfaces below Metal.framework or a firmware target
+may not ship the paravirtual GPU driver at all. For those cases we should reuse public AGX
+reverse-engineering work (where licensing permits) to model the minimum kernel/user-client ABI. The
+emulator can then choose between:
 
-- **paravirtual Metal/Vulkan** for fast GUI bring-up; and
+- **Apple PVG/Reims/Vulkan** for fast GUI bring-up on compatible guests; and
 - progressively more faithful **AGX device emulation** for compatibility.
 
-## Milestone 4: WindowServer / SpringBoard
+## Milestone 5: WindowServer / SpringBoard
 
 The first GUI success criterion is not "GPU benchmark passes"; it is:
 
