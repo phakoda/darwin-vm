@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: darwin-vm contributors <noreply@example.com>
+Date: Mon, 31 Aug 2026 14:10:00 -0400
+Subject: [PATCH] hw/arm/xnuboot: select XNU graphics console
+
+A valid Boot_Video framebuffer is not enough by itself. XNU's platform
+expert checks v_display and only initializes kPEGraphicsMode when it equals
+the bootloader GRAPHICS_MODE value. Select that mode so the early video
+console actually renders into the framebuffer.
+---
+ hw/arm/xnuboot_sptm.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/hw/arm/xnuboot_sptm.c b/hw/arm/xnuboot_sptm.c
+--- a/hw/arm/xnuboot_sptm.c
++++ b/hw/arm/xnuboot_sptm.c
+@@ -91,11 +91,11 @@ static void configure_boot_video(boot_args *args,
+ 
+     /*
+      * XNU treats bit 0 of v_baseAddr as "this is a physical address" and
+-     * maps the framebuffer itself.  Keep v_display=0 for the first milestone
+-     * so PE_create_console() selects the built-in text console.
++     * maps the framebuffer itself. XNU's bootloader GRAPHICS_MODE value is 1;
++     * PE_create_console() uses it to select kPEGraphicsMode.
+      */
+     args->Video.v_baseAddr = info->fb_base | 1;
+-    args->Video.v_display = 0;
++    args->Video.v_display = 1;
+     args->Video.v_rowBytes = DARWIN_BOOT_FB_ROW_BYTES;
+     args->Video.v_width = DARWIN_BOOT_FB_WIDTH;
+     args->Video.v_height = DARWIN_BOOT_FB_HEIGHT;
+-- 
+2.43.0
