@@ -3,7 +3,20 @@ import math
 import struct
 import argparse
 
-SUPPORTED_DRIVERS=[b'AppleARM', b'aic', b'arm-io', b'uart-1,samsung']
+# Keep compatibility strings only for devices that the emulator either models
+# today or is actively bringing up. Removing a compatible string prevents XNU
+# from matching the corresponding IOKit driver at all, so USB nodes must remain
+# matchable before their QEMU models can be useful. DART is handled by node name
+# below so enabling dart-usb does not accidentally enable every other DART.
+SUPPORTED_DRIVERS=[
+  b'AppleARM',
+  b'aic',
+  b'arm-io',
+  b'uart-1,samsung',
+  b'usb-drd',
+  b'usb-device',
+  b'atc-phy',
+]
 FREQUENCY = "u32:0x100000"
 IBOOT_NAME="qemu-sptm"
 
@@ -113,7 +126,10 @@ def del_compat(d):
     if type(compat) == str:
       compat = compat.encode('utf8')
 
-    if not any(x in compat for x in SUPPORTED_DRIVERS):
+    # Only dart-usb is implemented on the USB bring-up branch. Other DART
+    # nodes must remain unmatched until their MMIO/IOMMU instances are modeled.
+    keep_node = d.props.get('name') == 'dart-usb'
+    if not keep_node and not any(x in compat for x in SUPPORTED_DRIVERS):
       del d.props['compatible']
 
 def fixup_aic(aic):
@@ -258,67 +274,59 @@ def fixup(d, nvram_file):
 # returns (length, value)
 def parse_prop_entry(v) -> tuple[int, bytes]:
   if type(v) == bytes:
-    return len(v), v.ljust(round_up_to_multiple_of_4(len(v)),b'\x00')
+    return (len(v), v)
 
-  if type(v) == int:
-    raise TypeError("int type not specified")
-  if type(v) == dict:
-    raise TypeError("dicts aren't allowed as properties")
-  if type(v) != str:
-    raise ValueError(f"not a str ({type(v)})")
+  if v == "<NULL>":
+    return (0,b'')
 
-  if v.startswith("u32:"):
-    return 4, struct.pack("<I",int(v[4:],0))
-  elif v.startswith("u64:"):
-    return 8, struct.pack("<Q",int(v[4:],0))
-  elif v == "<NULL>":
-    return 0, b""
-  else:
-    # add 1 for null terminator, return strlen (incl. null byte) but pad to multiple of 4
-    strlen = len(v) + 1
-    prop_len = round_up_to_multiple_of_4(strlen)
-    rv1, rv2 = strlen, bytes(v,'utf8').ljust(prop_len,b'\x00')
-    if rv2[-1] != 0:
-      raise ValueError(f"Property {rv2} isn't NULL terminated ({rv2[-1]})")
-    return rv1, rv2
+  typ,val_str=v.split(':')
+  val=int(val_str,0)
 
-def encode_node(d):
-  outv = b""
-  outv+=struct.pack("<II", len(d.props), len(d.children))
+  if typ == 'u32':
+    return (4,struct.pack("<I",val))
+  if typ == 'u64':
+    return (8,struct.pack("<Q",val))
+  raise ValueError(f"unknown encoded prop type {typ}")
 
-  for k,v in d.props.items():
-    if len(k) >= 32:
-      raise ValueError(f"property name {k} is too long")
-    prop_name = bytes(k,'utf8').ljust(32,b'\x00')
-    if prop_name[-1] != 0:
-      raise ValueError(f"Property name {prop_name} isn't NULL terminated ({prop_name[-1]})")
-    prop_len, prop_val = parse_prop_entry(v)
+def encode_string(s):
+  return s.encode('utf8') + b'\0'
 
-    if len(prop_val) % 4 != 0:
-      raise ValueError(f"Property {k}'s value isn't a multiple of 4 bytes long ({prop_val})")
+def encode_node(node):
+  if '__placeholder_val' in node.props:
+    return node.props['__placeholder_val']
 
-    outv += prop_name
-    outv += struct.pack("<I", prop_len)
-    outv += prop_val
-    if len(outv) % 4 != 0:
-      raise ValueError(f"Binary stream misaligned at property {k}")
+  n_props=len(node.props)
+  n_children=len(node.children)
+  ret=struct.pack("<II", n_props,n_children)
+  for prop_name,prop_val in node.props.items():
+    if type(prop_val) == str and not ':' in prop_val and not prop_val == '<NULL>':
+      prop_val=encode_string(prop_val)
 
-  for c in d.children:
-    outv += encode_node(c)
-  return outv
+    prop_len, prop_val = parse_prop_entry(prop_val)
+    ret+=prop_name.encode('utf8').ljust(32,b'\0')
+    ret+=struct.pack("<I", prop_len)
+    ret+=prop_val.ljust(round_up_to_multiple_of_4(prop_len),b'\0')
+
+  for child in node.children:
+    ret+=encode_node(child)
+
+  return ret
 
 def main():
-  p = argparse.ArgumentParser(prog='dt_fixup')
-  p.add_argument('dtree', type=argparse.FileType('rb', 0))
-  p.add_argument('out', type=argparse.FileType('wb', 0))
-  p.add_argument('-nvram', required=True, type=argparse.FileType('rb', 0))
-  args = p.parse_args()
+  parser = argparse.ArgumentParser()
+  parser.add_argument('dtree', help='device tree file to patch')
+  parser.add_argument('nvram', help='NVRAM file to embed')
+  args=parser.parse_args()
 
-  dt_root = ADTNode()
-  decode_node(args.dtree.read(),dt_root)
-  fixup(dt_root, nvram_file=args.nvram)
-  args.out.write(encode_node(dt_root))
+  d = ADTNode()
+  with open(args.dtree,'rb') as inf:
+    decode_node(inf.read(),d)
 
-if __name__=="__main__":
+  with open(args.nvram,'rb') as nvram_file:
+    fixup(d,nvram_file)
+
+  with open(args.dtree,'wb') as outf:
+    outf.write(encode_node(d))
+
+if __name__ == '__main__':
   main()
-
