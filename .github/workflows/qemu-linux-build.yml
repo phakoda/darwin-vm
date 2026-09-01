@@ -5,6 +5,7 @@ on:
     paths:
       - "patches/qemu-sptm/**"
       - "qemu-overlays/**"
+      - "dt_fixup.py"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -14,9 +15,11 @@ on:
     branches:
       - "display-*"
       - "aic-*"
+      - "usb-*"
     paths:
       - "patches/qemu-sptm/**"
       - "qemu-overlays/**"
+      - "dt_fixup.py"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -32,11 +35,12 @@ jobs:
         with:
           submodules: true
 
-      - name: Validate host scripts and run arguments
+      - name: Validate host scripts and firmware fixups
         run: |
           bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
           bash tests/test_run_args.sh
           python3 tests/test_aic_fixup.py
+          python3 tests/test_dt_fixup.py
 
       - name: Apply darwin-vm QEMU patches
         run: |
@@ -74,7 +78,7 @@ jobs:
           qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1 \
             | grep -F "boot-fb"
 
-      - name: Verify Apple AIC QOM registration
+      - name: Verify Apple AIC and DART QOM registration
         run: |
           python3 - <<'PY'
           import json
@@ -116,8 +120,9 @@ jobs:
               "arguments": {"implements": "device", "abstract": False},
           })
           names = {entry["name"] for entry in types}
-          if "apple-aic" not in names:
-              raise RuntimeError("apple-aic QOM type is not registered")
+          missing = {"apple-aic", "apple-dart"} - names
+          if missing:
+              raise RuntimeError(f"missing QOM device types: {sorted(missing)}")
 
           command({"execute": "quit"})
           proc.wait(timeout=5)
