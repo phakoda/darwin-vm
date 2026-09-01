@@ -37,6 +37,13 @@ jobs:
           bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
           bash tests/test_run_args.sh
 
+      - name: Apply darwin-vm QEMU patches
+        run: |
+          ./scripts/apply_qemu_patches.sh
+          # The helper must be safe to run again on an already-patched tree.
+          ./scripts/apply_qemu_patches.sh
+          git -C qemu-sptm diff --check
+
       - name: Install QEMU build dependencies
         run: |
           sudo apt-get update
@@ -48,12 +55,6 @@ jobs:
             libglib2.0-dev \
             libpixman-1-dev \
             zlib1g-dev
-
-      - name: Apply darwin-vm QEMU patches
-        run: |
-          ./scripts/apply_qemu_patches.sh
-          # The helper must be safe to run again on an already-patched tree.
-          ./scripts/apply_qemu_patches.sh
 
       - name: Configure QEMU
         run: |
