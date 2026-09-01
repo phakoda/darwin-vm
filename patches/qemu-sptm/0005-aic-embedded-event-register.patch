@@ -8,9 +8,9 @@ Some Apple ADTs describe AIC2/3 with a single MMIO range and an
 separate-range form, but also allow the event/IACK register to live inside the
 primary AIC aperture.
 ---
- hw/arm/apple_aic.c | 10 ++++++++++
- hw/arm/darwin.c    | 24 ++++++++++++++++++------
- 2 files changed, 28 insertions(+), 6 deletions(-)
+ hw/arm/apple_aic.c | 11 +++++++++++
+ hw/arm/darwin.c    | 27 ++++++++++++++++++++-------
+ 2 files changed, 31 insertions(+), 7 deletions(-)
 
 diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
 --- a/hw/arm/apple_aic.c
@@ -35,7 +35,7 @@ diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
      if (s->version == 1) {
          if (addr == 0x0000) {
              return 1;
-@@ -573,6 +579,10 @@ AppleAICState *apple_aic_create(uint32_t version,
+@@ -573,6 +579,11 @@ AppleAICState *apple_aic_create(uint32_t version,
      s->base_size = base_size;
      s->event_size = event_size;
      s->separate_event = version >= 2 && event_size != 0;
@@ -50,7 +50,7 @@ diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
 diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 --- a/hw/arm/darwin.c
 +++ b/hw/arm/darwin.c
-@@ -187,12 +187,24 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -187,14 +187,27 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
               * per-SoC AIC2/3 capability discovery is available.
               */
              nr_irq = max_irq = A_GOOD_NUMBER_OF_IRQS;
