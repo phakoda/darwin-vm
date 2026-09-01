@@ -51,8 +51,10 @@ through the mask-clear register as part of EOI.
 The `aic-interrupt-controller` branch is compiled against the repository's pinned `qemu-sptm`
 revision on Ubuntu 24.04. CI copies the maintained AIC overlay into the QEMU source tree, applies the
 ordered Darwin patch series twice to verify idempotence, configures QEMU, builds
-`qemu-system-aarch64`, and checks that both the Darwin `boot-fb` machine option and the `apple-aic`
-device are registered in the resulting binary.
+`qemu-system-aarch64`, verifies the already-merged Darwin `boot-fb` machine option, and checks that the
+internal `apple-aic` QOM implementation is linked into the resulting binary. The AIC is instantiated
+by the Darwin machine from the guest ADT; it is intentionally not exposed as a generic user-created
+`-device` peripheral.
 
 ## Why this comes before USB/networking
 
