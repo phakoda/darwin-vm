@@ -14,9 +14,9 @@ firmware behavior, and retain a second MMIO range only as a compatibility
 fallback for trees without that property.
 ---
  hw/arm/apple_aic.c         | 29 ++++++++++++++++++++++++++---
- hw/arm/darwin.c            | 67 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------
+ hw/arm/darwin.c            | 70 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------
  include/hw/arm/apple_aic.h |  3 +++
- 3 files changed, 89 insertions(+), 10 deletions(-)
+ 3 files changed, 92 insertions(+), 10 deletions(-)
 
 diff --git a/include/hw/arm/apple_aic.h b/include/hw/arm/apple_aic.h
 --- a/include/hw/arm/apple_aic.h
@@ -156,7 +156,7 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 +    uint32_t irq_cfg_base = 0;
  
      if (!aic) {
-@@ -191,25 +220,48 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -191,25 +220,51 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
               * per-SoC AIC2/3 capability discovery is available.
               */
              nr_irq = max_irq = A_GOOD_NUMBER_OF_IRQS;
@@ -229,7 +229,7 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 -                event_size = 0;
 -            }
              break;
-@@ -231,5 +283,6 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -231,5 +286,6 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
      return apple_aic_create(aic_vers, nr_irq, max_irq,
                              aic_reg[0].base + iobase, aic_reg[0].len,
                              event_base, event_size,
