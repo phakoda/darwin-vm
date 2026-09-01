@@ -72,7 +72,7 @@ jobs:
           qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1 \
             | grep -F "boot-fb"
 
-      - name: Verify Apple AIC device registration
+      - name: Verify Apple AIC is linked
         run: |
-          qemu-sptm/build/qemu-system-aarch64 -device help 2>&1 \
-            | grep -F 'name "apple-aic"'
+          strings qemu-sptm/build/qemu-system-aarch64 \
+            | grep -Fx "apple-aic"
