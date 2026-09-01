@@ -11,8 +11,8 @@ For two-bank DART nodes retain bank 1 as the USB DMA translation instance,
 matching the public T8030 USB path; one-bank trees use bank 0. The selected
 instance is kept in DarwinState for the following USB/xHCI integration.
 ---
- hw/arm/darwin.c | 74 ++++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 74 insertions(+)
+ hw/arm/darwin.c | 72 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 72 insertions(+)
 
 diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 index 0000000..0000000 100644
@@ -35,7 +35,7 @@ index 0000000..0000000 100644
      struct xnu_boot_info bootinfo;
      QemuConsole *con;
      DisplaySurface *fb_surface;
-@@ -205,4 +208,73 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -205,4 +208,71 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
                              qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
  }
  
@@ -108,7 +108,7 @@ index 0000000..0000000 100644
 +}
 +
  static void setup_mte(Object *cpuobj, MachineState *machine, struct xnu_boot_info *info) {
-@@ -389,6 +461,8 @@ static void darwin_init(MachineState *ms) {
+@@ -389,6 +459,8 @@ static void darwin_init(MachineState *ms) {
      qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
  
      s->aic = init_aic(dt_root, iobase, cpudev);
