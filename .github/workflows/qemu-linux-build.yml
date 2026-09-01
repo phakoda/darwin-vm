@@ -5,6 +5,7 @@ on:
     paths:
       - "patches/qemu-sptm/**"
       - "qemu-overlays/**"
+      - "dt_fixup.py"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -14,9 +15,11 @@ on:
     branches:
       - "display-*"
       - "aic-*"
+      - "usb-*"
     paths:
       - "patches/qemu-sptm/**"
       - "qemu-overlays/**"
+      - "dt_fixup.py"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -32,10 +35,11 @@ jobs:
         with:
           submodules: true
 
-      - name: Validate host scripts and run arguments
+      - name: Validate host scripts and firmware fixups
         run: |
           bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
           bash tests/test_run_args.sh
+          python3 tests/test_dt_fixup.py
 
       - name: Install QEMU build dependencies
         run: |
