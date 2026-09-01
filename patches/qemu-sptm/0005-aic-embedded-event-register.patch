@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: phakoda <130813466+phakoda@users.noreply.github.com>
+Date: Tue, 1 Sep 2026 13:05:00 -0400
+Subject: [PATCH] aic: support embedded AIC2/3 event register
+
+Some Apple ADTs describe AIC2/3 with a single MMIO range and an
+`aic-iack-offset` property instead of a second event-register range. Keep the
+separate-range form, but also allow the event/IACK register to live inside the
+primary AIC aperture.
+---
+ hw/arm/apple_aic.c | 10 ++++++++++
+ hw/arm/darwin.c    | 24 ++++++++++++++++++------
+ 2 files changed, 28 insertions(+), 6 deletions(-)
+
+diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
+--- a/hw/arm/apple_aic.c
++++ b/hw/arm/apple_aic.c
+@@ -65,6 +65,8 @@ struct AppleAICState {
+     uint64_t base_size;
+     uint64_t event_size;
+     bool separate_event;
++    bool embedded_event;
++    hwaddr event_offset;
+     bool enabled;
+ 
+     uint32_t config;
+@@ -245,6 +247,10 @@ static uint64_t apple_aic_read(void *opaque, hwaddr addr, unsigned size)
+ 
+     (void)size;
+ 
++    if (s->version >= 2 && s->embedded_event && addr == s->event_offset) {
++        return apple_aic_ack(s);
++    }
++
+     if (s->version == 1) {
+         if (addr == 0x0000) {
+             return 1;
+@@ -573,6 +579,10 @@ AppleAICState *apple_aic_create(uint32_t version,
+     s->base_size = base_size;
+     s->event_size = event_size;
+     s->separate_event = version >= 2 && event_size != 0;
++    s->embedded_event = version >= 2 && event_size == 0 &&
++                        event_base >= base && event_base < base + base_size;
++    if (s->embedded_event) {
++        s->event_offset = event_base - base;
++    }
+ 
+     sysbus_realize_and_unref(sbd, &error_fatal);
+     sysbus_mmio_map(sbd, 0, base);
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -187,12 +187,24 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+              * per-SoC AIC2/3 capability discovery is available.
+              */
+             nr_irq = max_irq = A_GOOD_NUMBER_OF_IRQS;
+-            if (reg_count < 2) {
+-                fprintf(stderr,
+-                        "error: AIC%d requires a separate event register region\n",
+-                        aic_vers);
+-                exit(1);
++            if (reg_count >= 2) {
++                event_base = aic_reg[1].base + iobase;
++                event_size = aic_reg[1].len;
++            } else {
++                uint64_t *iack_offset =
++                    adt_get_prop_val(aic, "aic-iack-offset");
++
++                if (!iack_offset ||
++                    adt_get_prop_len(aic, "aic-iack-offset") <
++                        sizeof(*iack_offset) ||
++                    *iack_offset >= aic_reg[0].len) {
++                    fprintf(stderr,
++                            "error: AIC%d has no usable event register\n",
++                            aic_vers);
++                    exit(1);
++                }
++
++                event_base = aic_reg[0].base + iobase + *iack_offset;
++                /* Zero size selects embedded-event mode in apple-aic. */
++                event_size = 0;
+             }
+-            event_base = aic_reg[1].base + iobase;
+-            event_size = aic_reg[1].len;
+             break;
+ 
+         default:
+-- 
+2.43.0
