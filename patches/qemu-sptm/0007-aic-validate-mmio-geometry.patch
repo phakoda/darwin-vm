@@ -22,7 +22,7 @@ diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
  
      if (!s->nr_irq || !s->max_irq || s->nr_irq > s->max_irq) {
          error_setg(errp, "apple-aic: invalid IRQ geometry %u/%u",
-@@ -528,7 +529,27 @@ static void apple_aic_realize(DeviceState *dev, Error **errp)
+@@ -528,6 +529,26 @@ static void apple_aic_realize(DeviceState *dev, Error **errp)
      s->mask_set = s->sw_clr + s->num_words * sizeof(uint32_t);
      s->mask_clr = s->mask_set + s->num_words * sizeof(uint32_t);
      s->hw_state = s->mask_clr + s->num_words * sizeof(uint32_t);
