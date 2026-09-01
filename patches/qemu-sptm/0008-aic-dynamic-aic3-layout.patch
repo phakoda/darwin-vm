@@ -154,7 +154,7 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 +    uint32_t irq_cfg_base = 0;
  
      if (!aic) {
-@@ -191,4 +220,25 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -191,25 +220,43 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
               * per-SoC AIC2/3 capability discovery is available.
               */
              nr_irq = max_irq = A_GOOD_NUMBER_OF_IRQS;
@@ -179,8 +179,6 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 +                exit(1);
 +            }
 +
-             if (reg_count >= 2) {
-@@ -217,22 +267,19 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
              if (reg_count >= 2) {
                  event_base = aic_reg[1].base + iobase;
                  event_size = aic_reg[1].len;
