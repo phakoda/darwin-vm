@@ -36,6 +36,7 @@ jobs:
         run: |
           bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
           bash tests/test_run_args.sh
+          python3 tests/test_aic_fixup.py
 
       - name: Apply darwin-vm QEMU patches
         run: |
