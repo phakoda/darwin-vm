@@ -39,12 +39,21 @@ are derived from a 0x400-IRQ maximum and land at:
 - `0x4200`: hardware line state.
 
 For AIC v2/v3, the per-IRQ configuration block starts at `0x2000`/`0x10000` respectively, followed
-by software-set, software-clear, mask-set, mask-clear, and hardware-state bitmaps. The event register
-is provided through the second AIC register range.
+by software-set, software-clear, mask-set, mask-clear, and hardware-state bitmaps. Upstream Linux
+describes the AP event register as a second device-tree `reg` entry. Apple/Darwin device trees can
+also describe the IACK/event register inside the primary aperture with `aic-iack-offset`; the model
+accepts both layouts. The embedded form is bounds-checked so the four-byte event access cannot extend
+past the primary MMIO region.
 
 An IRQ event is encoded with event type `1` and the interrupt number in the low 16 bits. Reading the
 event register acknowledges and automatically masks the interrupt. The guest subsequently unmasks it
 through the mask-clear register as part of EOI.
+
+The Darwin initializer validates required AIC ADT properties before querying their lengths, because
+the minimal QEMU ADT helper assumes a property exists. The AIC device also validates that the primary
+MMIO aperture is large enough for its computed IRQ/config/mask blocks and that AIC2/3 has a usable
+event register before realization. Invalid firmware descriptions therefore fail at startup with an
+explicit error instead of turning into a host-side null dereference or later unmapped MMIO access.
 
 ## Linux build validation
 
