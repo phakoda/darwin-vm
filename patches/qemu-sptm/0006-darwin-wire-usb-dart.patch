@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: phakoda <130813466+phakoda@users.noreply.github.com>
+Date: Tue, 1 Sep 2026 04:02:00 -0400
+Subject: [PATCH] darwin: instantiate dart-usb from the ADT
+
+Create the USB DART only when the guest device tree exposes arm-io/dart-usb.
+Derive MMIO, page size, stream IDs, bypass configuration, and fault routing
+from the ADT rather than hard-coding one SoC layout.
+
+For two-bank DART nodes retain bank 1 as the USB DMA translation instance,
+matching the public T8030 USB path; one-bank trees use bank 0. The selected
+instance is kept in DarwinState for the following USB/xHCI integration.
+---
+ hw/arm/darwin.c | 79 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 79 insertions(+)
+
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index 0000000..0000000 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -18,6 +18,7 @@
+ #include "hw/core/sysbus.h"
+ #include "hw/core/platform-bus.h"
+ #include "hw/arm/apple_aic.h"
++#include "hw/arm/apple_dart.h"
+ #include "xnu/boot/xnuboot.h"
+ #include "xnu/apple_dtree.h"
+ #include "xnu/apple_regs.h"
+@@ -47,6 +48,8 @@ struct DarwinState {
+     MachineState parent_obj;
+     ARMCPU *cpu;
+     AppleAICState *aic;
++    AppleDARTState *dart_usb;
++    uint32_t dart_usb_dma_instance;
+     struct xnu_boot_info bootinfo;
+     QemuConsole *con;
+     DisplaySurface *fb_surface;
+@@ -205,6 +208,80 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+                             qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
+ }
+ 
++static AppleDARTState *init_dart_usb(DarwinState *s,
++                                     struct dtree_node *dt_root,
++                                     uint64_t iobase)
++{
++    struct dtree_node *dart = adt_find_node(dt_root, "arm-io/dart-usb");
++    struct adt_io_reg *regs;
++    size_t reg_count;
++    hwaddr bases[2] = { 0 };
++    uint64_t sizes[2] = { 0 };
++    uint32_t page_size = 4096;
++    uint32_t sids = 0xffff;
++    uint32_t bypass = 0;
++    uint64_t bypass_address = 0;
++    qemu_irq fault_irq = NULL;
++
++    if (!dart) {
++        return NULL;
++    }
++
++    regs = adt_get_prop_val(dart, "reg");
++    reg_count = adt_get_prop_len(dart, "reg") / sizeof(*regs);
++    if (!regs || reg_count == 0) {
++        fprintf(stderr, "warning: dart-usb has no usable reg property; USB DMA disabled\n");
++        return NULL;
++    }
++    if (reg_count > ARRAY_SIZE(bases)) {
++        fprintf(stderr,
++                "warning: dart-usb exposes %zu MMIO banks; using the first %zu\n",
++                reg_count, ARRAY_SIZE(bases));
++        reg_count = ARRAY_SIZE(bases);
++    }
++
++    for (size_t i = 0; i < reg_count; i++) {
++        bases[i] = regs[i].base + iobase;
++        sizes[i] = regs[i].len;
++    }
++
++    if (adt_get_prop_len(dart, "page-size") >= sizeof(uint32_t)) {
++        page_size = *(uint32_t *)adt_get_prop_val(dart, "page-size");
++    }
++    if (page_size != 4096 && page_size != 16384) {
++        fprintf(stderr,
++                "warning: dart-usb page-size %u unsupported; using 4096\n",
++                page_size);
++        page_size = 4096;
++    }
++
++    if (adt_get_prop_len(dart, "sids") >= sizeof(uint32_t)) {
++        sids = *(uint32_t *)adt_get_prop_val(dart, "sids");
++    }
++    if (adt_get_prop_len(dart, "bypass") >= sizeof(uint32_t)) {
++        bypass = *(uint32_t *)adt_get_prop_val(dart, "bypass");
++    }
++    if (adt_get_prop_len(dart, "bypass-address") >= sizeof(uint64_t)) {
++        bypass_address = *(uint64_t *)adt_get_prop_val(dart, "bypass-address");
++    }
++
++    if (adt_get_prop_len(dart, "interrupts") >= sizeof(uint32_t)) {
++        uint32_t *interrupts = adt_get_prop_val(dart, "interrupts");
++        fault_irq = apple_aic_get_irq(s->aic, interrupts[0]);
++    }
++
++    s->dart_usb_dma_instance = reg_count > 1 ? 1 : 0;
++    return apple_dart_create("dart-usb", page_size, sids, bypass,
++                             bypass_address, reg_count, bases, sizes,
++                             fault_irq);
++}
++
+ static void setup_mte(Object *cpuobj, MachineState *machine, struct xnu_boot_info *info) {
+     MemoryRegion *tag_sysmem = NULL;
+@@ -389,6 +466,8 @@ static void darwin_init(MachineState *ms) {
+     qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
+ 
+     s->aic = init_aic(dt_root, iobase, cpudev);
++    s->dart_usb = init_dart_usb(s, dt_root, iobase);
++
+     // On Apple Si, FIQ is hardwired to platform timer
+     qdev_connect_gpio_out(cpudev, GTIMER_HYPVIRT, qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
+ 
+-- 
+2.43.0
