@@ -73,7 +73,51 @@ jobs:
           qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1 \
             | grep -F "boot-fb"
 
-      - name: Verify Apple AIC is linked
+      - name: Verify Apple AIC QOM registration
         run: |
-          strings qemu-sptm/build/qemu-system-aarch64 \
-            | grep -Fx "apple-aic"
+          python3 - <<'PY'
+          import json
+          import subprocess
+
+          qemu = "qemu-sptm/build/qemu-system-aarch64"
+          proc = subprocess.Popen(
+              [qemu, "-machine", "none", "-nodefaults", "-display", "none", "-qmp", "stdio"],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              text=True,
+          )
+
+          assert proc.stdin is not None
+          assert proc.stdout is not None
+
+          greeting = json.loads(proc.stdout.readline())
+          if "QMP" not in greeting:
+              raise RuntimeError(f"unexpected QMP greeting: {greeting!r}")
+
+          def command(payload):
+              proc.stdin.write(json.dumps(payload) + "\n")
+              proc.stdin.flush()
+              while True:
+                  line = proc.stdout.readline()
+                  if not line:
+                      stderr = proc.stderr.read() if proc.stderr is not None else ""
+                      raise RuntimeError(f"QEMU exited during QMP command; stderr={stderr}")
+                  message = json.loads(line)
+                  if "return" in message:
+                      return message["return"]
+                  if "error" in message:
+                      raise RuntimeError(f"QMP command failed: {message['error']}")
+
+          command({"execute": "qmp_capabilities"})
+          types = command({
+              "execute": "qom-list-types",
+              "arguments": {"implements": "device", "abstract": False},
+          })
+          names = {entry["name"] for entry in types}
+          if "apple-aic" not in names:
+              raise RuntimeError("apple-aic QOM type is not registered")
+
+          command({"execute": "quit"})
+          proc.wait(timeout=5)
+          PY
