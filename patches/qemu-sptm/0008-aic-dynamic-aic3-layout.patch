@@ -7,12 +7,14 @@ AIC3 firmware describes its capability and external-interrupt register offsets
 through ADT properties instead of relying on the AIC2 fixed layout. Pass those
 offsets into the AIC model so newer Apple device trees can use their native
 register geometry. Keep the documented AIC2 defaults and honor its optional
-extint-baseaddress override.
+extint-baseaddress override. Read the 64-bit IACK offset through QEMU's
+unaligned little-endian helper because ADT properties are only four-byte
+aligned.
 ---
  hw/arm/apple_aic.c         | 29 ++++++++++++++++++++++++++---
- hw/arm/darwin.c            | 38 ++++++++++++++++++++++++++++++++++++++
+ hw/arm/darwin.c            | 62 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-------
  include/hw/arm/apple_aic.h |  3 +++
- 3 files changed, 67 insertions(+), 3 deletions(-)
+ 3 files changed, 84 insertions(+), 10 deletions(-)
 
 diff --git a/include/hw/arm/apple_aic.h b/include/hw/arm/apple_aic.h
 --- a/include/hw/arm/apple_aic.h
@@ -111,7 +113,7 @@ diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
 diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 --- a/hw/arm/darwin.c
 +++ b/hw/arm/darwin.c
-@@ -137,5 +137,18 @@ static void init_sep(struct dtree_node *dt_root) {
+@@ -137,5 +137,31 @@ static void init_sep(struct dtree_node *dt_root) {
  
      alloc_zeroed("sep", sep_reg[0].base, sep_reg[0].len);
  }
@@ -129,8 +131,21 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 +    return true;
 +}
 +
++static bool adt_read_u64_prop(struct dtree_node *node, const char *name,
++                              uint64_t *value)
++{
++    const void *prop = adt_get_prop_val(node, name);
++
++    if (!prop || adt_get_prop_len(node, name) < sizeof(*value)) {
++        return false;
++    }
++
++    *value = ldq_le_p(prop);
++    return true;
++}
++
  static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
-@@ -151,5 +164,8 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -151,5 +177,8 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
      uint32_t max_irq = 0;
      hwaddr event_base = 0;
      uint64_t event_size = 0;
@@ -139,7 +154,7 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 +    uint32_t irq_cfg_base = 0;
  
      if (!aic) {
-@@ -191,4 +207,25 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -191,4 +220,25 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
               * per-SoC AIC2/3 capability discovery is available.
               */
              nr_irq = max_irq = A_GOOD_NUMBER_OF_IRQS;
@@ -165,7 +180,34 @@ diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 +            }
 +
              if (reg_count >= 2) {
-@@ -231,5 +266,6 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -217,22 +267,19 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+             if (reg_count >= 2) {
+                 event_base = aic_reg[1].base + iobase;
+                 event_size = aic_reg[1].len;
+             } else {
+-                uint64_t *iack_offset =
+-                    adt_get_prop_val(aic, "aic-iack-offset");
++                uint64_t iack_offset;
+ 
+-                if (!iack_offset ||
+-                    adt_get_prop_len(aic, "aic-iack-offset") <
+-                        sizeof(*iack_offset) ||
+-                    *iack_offset >= aic_reg[0].len) {
++                if (!adt_read_u64_prop(aic, "aic-iack-offset", &iack_offset) ||
++                    iack_offset >= aic_reg[0].len) {
+                     fprintf(stderr,
+                             "error: AIC%d has no usable event register\n",
+                             aic_vers);
+                     exit(1);
+                 }
+ 
+-                event_base = aic_reg[0].base + iobase + *iack_offset;
++                event_base = aic_reg[0].base + iobase + iack_offset;
+                 /* Zero size selects embedded-event mode in apple-aic. */
+                 event_size = 0;
+             }
+             break;
+@@ -231,5 +278,6 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
      return apple_aic_create(aic_vers, nr_irq, max_irq,
                              aic_reg[0].base + iobase, aic_reg[0].len,
                              event_base, event_size,
