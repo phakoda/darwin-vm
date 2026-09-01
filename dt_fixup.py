@@ -5,14 +5,14 @@ import argparse
 
 # Keep compatibility strings only for devices that the emulator either models
 # today or is actively bringing up. Removing a compatible string prevents XNU
-# from matching the corresponding IOKit driver at all, so USB/DART nodes must
-# remain matchable before their QEMU models can be useful.
+# from matching the corresponding IOKit driver at all, so USB nodes must remain
+# matchable before their QEMU models can be useful. DART is handled by node name
+# below so enabling dart-usb does not accidentally enable every other DART.
 SUPPORTED_DRIVERS=[
   b'AppleARM',
   b'aic',
   b'arm-io',
   b'uart-1,samsung',
-  b'dart',
   b'usb-drd',
   b'usb-device',
   b'atc-phy',
@@ -126,7 +126,10 @@ def del_compat(d):
     if type(compat) == str:
       compat = compat.encode('utf8')
 
-    if not any(x in compat for x in SUPPORTED_DRIVERS):
+    # Only dart-usb is implemented on the USB bring-up branch. Other DART
+    # nodes must remain unmatched until their MMIO/IOMMU instances are modeled.
+    keep_node = d.props.get('name') == 'dart-usb'
+    if not keep_node and not any(x in compat for x in SUPPORTED_DRIVERS):
       del d.props['compatible']
 
 def fixup_aic(aic):
