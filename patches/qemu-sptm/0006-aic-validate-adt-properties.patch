@@ -7,13 +7,13 @@ The minimalist ADT helper assumes a property exists when querying its length.
 Check required AIC properties first so malformed or variant device trees fail
 with a useful error instead of dereferencing a missing property.
 ---
- hw/arm/darwin.c | 18 +++++++++++++++++-
- 1 file changed, 18 insertions(+), 1 deletion(-)
+ hw/arm/darwin.c | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
 
 diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
 --- a/hw/arm/darwin.c
 +++ b/hw/arm/darwin.c
-@@ -141,23 +141,30 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+@@ -141,22 +141,29 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
                                 DeviceState *cpudev) {
      struct dtree_node *aic = adt_find_node(dt_root, "arm-io/aic");
      struct adt_io_reg *aic_reg;
