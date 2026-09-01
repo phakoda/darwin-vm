@@ -26,14 +26,18 @@ def main():
         node("usb-device", b"usb-device,t8030\x00usb-device,s5l8900x\x00"),
         node("atc-phy", b"atc-phy,t8030\x00atc-phy,t8027\x00"),
     ]
-    stripped = node("unsupported", b"some-unimplemented-device\x00")
-    root.children = preserved + [stripped]
+    stripped = [
+        node("dart-disp0", b"dart,t8030\x00dart,t8027\x00"),
+        node("unsupported", b"some-unimplemented-device\x00"),
+    ]
+    root.children = preserved + stripped
 
     del_compat(root)
 
     for n in preserved:
         assert "compatible" in n.props, f"{n.props['name']} lost compatible"
-    assert "compatible" not in stripped.props, "unsupported driver was retained"
+    for n in stripped:
+        assert "compatible" not in n.props, f"{n.props['name']} was unexpectedly enabled"
 
     print("dt_fixup compatibility tests passed")
 
