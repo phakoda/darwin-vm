@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: phakoda <130813466+phakoda@users.noreply.github.com>
+Date: Tue, 1 Sep 2026 13:25:00 -0400
+Subject: [PATCH] aic: validate MMIO geometry before realizing
+
+Reject AIC descriptions whose primary aperture cannot contain the computed
+IRQ/config/mask register layout. AIC2/3 also require either a valid separate
+event region or a four-byte embedded event register within the primary
+aperture.
+---
+ hw/arm/apple_aic.c | 27 +++++++++++++++++++++++++--
+ 1 file changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/hw/arm/apple_aic.c b/hw/arm/apple_aic.c
+--- a/hw/arm/apple_aic.c
++++ b/hw/arm/apple_aic.c
+@@ -493,6 +493,7 @@ static void apple_aic_realize(DeviceState *dev, Error **errp)
+ {
+     AppleAICState *s = APPLE_AIC(dev);
+     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
++    uint64_t required_size;
+ 
+     if (!s->nr_irq || !s->max_irq || s->nr_irq > s->max_irq) {
+         error_setg(errp, "apple-aic: invalid IRQ geometry %u/%u",
+@@ -528,7 +529,27 @@ static void apple_aic_realize(DeviceState *dev, Error **errp)
+     s->mask_set = s->sw_clr + s->num_words * sizeof(uint32_t);
+     s->mask_clr = s->mask_set + s->num_words * sizeof(uint32_t);
+     s->hw_state = s->mask_clr + s->num_words * sizeof(uint32_t);
+ 
++    required_size = s->hw_state + s->num_words * sizeof(uint32_t);
++    if (s->base_size < required_size) {
++        error_setg(errp,
++                   "apple-aic: MMIO aperture too small: 0x%" PRIx64
++                   " bytes, need 0x%" PRIx64,
++                   s->base_size, required_size);
++        return;
++    }
++
++    if (s->version >= 2 && !s->separate_event && !s->embedded_event) {
++        error_setg(errp, "apple-aic: AIC%u has no usable event register",
++                   s->version);
++        return;
++    }
++
++    if (s->separate_event && s->event_size < sizeof(uint32_t)) {
++        error_setg(errp, "apple-aic: event MMIO aperture is too small");
++        return;
++    }
++
+     memory_region_init_io(&s->regs, OBJECT(dev), &apple_aic_ops, s,
+                           "apple-aic", s->base_size);
+@@ -579,8 +600,10 @@ AppleAICState *apple_aic_create(uint32_t version,
+     s->base_size = base_size;
+     s->event_size = event_size;
+     s->separate_event = version >= 2 && event_size != 0;
+     s->embedded_event = version >= 2 && event_size == 0 &&
+-                        event_base >= base && event_base < base + base_size;
++                        base_size >= sizeof(uint32_t) &&
++                        event_base >= base &&
++                        event_base - base <= base_size - sizeof(uint32_t);
+     if (s->embedded_event) {
+         s->event_offset = event_base - base;
+     }
+-- 
+2.43.0
