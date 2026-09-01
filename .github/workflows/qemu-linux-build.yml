@@ -1,0 +1,70 @@
+name: QEMU Linux build
+
+on:
+  pull_request:
+    paths:
+      - "patches/qemu-sptm/**"
+      - "scripts/apply_qemu_patches.sh"
+      - "build_qemu.sh"
+      - "run.sh"
+      - "tests/**"
+      - ".github/workflows/qemu-linux-build.yml"
+  push:
+    branches:
+      - "display-*"
+    paths:
+      - "patches/qemu-sptm/**"
+      - "scripts/apply_qemu_patches.sh"
+      - "build_qemu.sh"
+      - "run.sh"
+      - "tests/**"
+      - ".github/workflows/qemu-linux-build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Validate host scripts and run arguments
+        run: |
+          bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
+          bash tests/test_run_args.sh
+
+      - name: Install QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ninja-build \
+            pkg-config \
+            python3-venv \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            zlib1g-dev
+
+      - name: Apply darwin-vm QEMU patches
+        run: |
+          ./scripts/apply_qemu_patches.sh
+          # The helper must be safe to run again on an already-patched tree.
+          ./scripts/apply_qemu_patches.sh
+
+      - name: Configure QEMU
+        run: |
+          mkdir -p qemu-sptm/build
+          cd qemu-sptm/build
+          ../configure \
+            --target-list=aarch64-softmmu \
+            --disable-docs \
+            --disable-werror
+
+      - name: Build Darwin QEMU
+        run: ninja -C qemu-sptm/build qemu-system-aarch64
+
+      - name: Verify Darwin framebuffer machine property
+        run: |
+          qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1 \
+            | grep -F "boot-fb"
