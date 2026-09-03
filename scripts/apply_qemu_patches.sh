@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QEMU_DIR="${ROOT_DIR}/qemu-sptm"
 PATCH_DIR="${ROOT_DIR}/patches/qemu-sptm"
+OVERLAY_DIR="${ROOT_DIR}/qemu-overlays"
 EXPECTED_QEMU_REV="006cc6b174e6177e64d06a6457e4125fd627649f"
 
 die() {
@@ -24,13 +25,31 @@ patches=("${PATCH_DIR}"/*.patch)
 ((${#patches[@]} > 0)) || die "no QEMU patches found in ${PATCH_DIR}"
 
 # Patches form an ordered series, so a later patch may intentionally change a
-# line introduced by an earlier one. In that final state, reverse-checking the
-# earlier patch by itself is expected to fail. If the final patch reverses
-# cleanly, the series reached its final state and there is nothing to do.
+# line introduced by an earlier one. The series may also patch a mirrored
+# overlay file. Check the completed state before re-copying overlays; otherwise
+# a second invocation could overwrite a final patched overlay and break the
+# idempotence guarantee.
 last_patch="${patches[${#patches[@]} - 1]}"
 if git -C "${QEMU_DIR}" apply --reverse --check "${last_patch}" >/dev/null 2>&1; then
     echo "QEMU patch series: already applied"
     exit 0
+fi
+
+# New source files are kept as ordinary files in darwin-vm so they can be
+# reviewed and edited normally. Mirror them into the external QEMU submodule
+# before applying the small integration patches. On a pristine submodule the
+# final-patch reverse check above simply fails because these files do not exist
+# yet, so the initial mirror still happens as expected.
+if [[ -d "${OVERLAY_DIR}" ]]; then
+    while IFS= read -r -d '' overlay; do
+        rel="${overlay#${OVERLAY_DIR}/}"
+        dest="${QEMU_DIR}/${rel}"
+        mkdir -p "$(dirname "${dest}")"
+        if ! cmp -s "${overlay}" "${dest}"; then
+            echo "overlay: ${rel}"
+            cp "${overlay}" "${dest}"
+        fi
+    done < <(find "${OVERLAY_DIR}" -type f -print0 | sort -z)
 fi
 
 for patch in "${patches[@]}"; do

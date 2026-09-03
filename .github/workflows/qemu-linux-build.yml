@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "patches/qemu-sptm/**"
+      - "qemu-overlays/**"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -12,8 +13,10 @@ on:
   push:
     branches:
       - "display-*"
+      - "aic-*"
     paths:
       - "patches/qemu-sptm/**"
+      - "qemu-overlays/**"
       - "scripts/apply_qemu_patches.sh"
       - "build_qemu.sh"
       - "run.sh"
@@ -33,6 +36,14 @@ jobs:
         run: |
           bash -n run.sh build_qemu.sh scripts/apply_qemu_patches.sh
           bash tests/test_run_args.sh
+          python3 tests/test_aic_fixup.py
+
+      - name: Apply darwin-vm QEMU patches
+        run: |
+          ./scripts/apply_qemu_patches.sh
+          # The helper must be safe to run again on an already-patched tree.
+          ./scripts/apply_qemu_patches.sh
+          git -C qemu-sptm diff --check
 
       - name: Install QEMU build dependencies
         run: |
@@ -45,12 +56,6 @@ jobs:
             libglib2.0-dev \
             libpixman-1-dev \
             zlib1g-dev
-
-      - name: Apply darwin-vm QEMU patches
-        run: |
-          ./scripts/apply_qemu_patches.sh
-          # The helper must be safe to run again on an already-patched tree.
-          ./scripts/apply_qemu_patches.sh
 
       - name: Configure QEMU
         run: |
@@ -68,3 +73,52 @@ jobs:
         run: |
           qemu-sptm/build/qemu-system-aarch64 -M darwin,help 2>&1 \
             | grep -F "boot-fb"
+
+      - name: Verify Apple AIC QOM registration
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+
+          qemu = "qemu-sptm/build/qemu-system-aarch64"
+          proc = subprocess.Popen(
+              [qemu, "-machine", "none", "-nodefaults", "-display", "none", "-qmp", "stdio"],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              text=True,
+          )
+
+          assert proc.stdin is not None
+          assert proc.stdout is not None
+
+          greeting = json.loads(proc.stdout.readline())
+          if "QMP" not in greeting:
+              raise RuntimeError(f"unexpected QMP greeting: {greeting!r}")
+
+          def command(payload):
+              proc.stdin.write(json.dumps(payload) + "\n")
+              proc.stdin.flush()
+              while True:
+                  line = proc.stdout.readline()
+                  if not line:
+                      stderr = proc.stderr.read() if proc.stderr is not None else ""
+                      raise RuntimeError(f"QEMU exited during QMP command; stderr={stderr}")
+                  message = json.loads(line)
+                  if "return" in message:
+                      return message["return"]
+                  if "error" in message:
+                      raise RuntimeError(f"QMP command failed: {message['error']}")
+
+          command({"execute": "qmp_capabilities"})
+          types = command({
+              "execute": "qom-list-types",
+              "arguments": {"implements": "device", "abstract": False},
+          })
+          names = {entry["name"] for entry in types}
+          if "apple-aic" not in names:
+              raise RuntimeError("apple-aic QOM type is not registered")
+
+          command({"execute": "quit"})
+          proc.wait(timeout=5)
+          PY

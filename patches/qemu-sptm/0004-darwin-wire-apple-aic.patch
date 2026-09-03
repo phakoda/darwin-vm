@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: phakoda <130813466+phakoda@users.noreply.github.com>
+Date: Tue, 1 Sep 2026 03:40:00 -0400
+Subject: [PATCH] darwin: replace AIC stub with functional controller
+
+Instantiate the Apple AIC model from the guest ADT instead of reserving a
+zero-filled MMIO region. Route its single CPU output to ARM_CPU_IRQ while
+keeping the architectural timer wired directly to ARM_CPU_FIQ.
+
+Keep the controller in DarwinState so future USB, HID, networking, display,
+and GPU models can request AIC input lines without rebuilding interrupt
+routing ad hoc.
+---
+ hw/arm/darwin.c | 70 +++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 49 insertions(+), 21 deletions(-)
+
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index 0000000..0000000 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -17,6 +17,7 @@
+ #include "system/system.h"
+ #include "hw/core/sysbus.h"
+ #include "hw/core/platform-bus.h"
++#include "hw/arm/apple_aic.h"
+ #include "xnu/boot/xnuboot.h"
+ #include "xnu/apple_dtree.h"
+ #include "xnu/apple_regs.h"
+@@ -45,5 +46,6 @@ struct DarwinState {
+     MachineState parent_obj;
+     ARMCPU *cpu;
++    AppleAICState *aic;
+     struct xnu_boot_info bootinfo;
+     QemuConsole *con;
+     DisplaySurface *fb_surface;
+@@ -139,39 +141,65 @@ static void init_sep(struct dtree_node *dt_root) {
+     alloc_zeroed("sep", sep_reg[0].base, sep_reg[0].len);
+ }
+ 
+-static void init_aic(struct dtree_node *dt_root, uint64_t iobase) {
+-    // This is a bare-bones aic implementation that ignores all register reads/
+-    // writes, and simply reports the correct number of IRQs
++static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
++                               DeviceState *cpudev) {
+     struct dtree_node *aic = adt_find_node(dt_root, "arm-io/aic");
+-    struct adt_io_reg *aic_reg = adt_get_prop_val(aic, "reg");
+-
+-    uint64_t base = aic_reg[0].base + iobase;
+-    alloc_zeroed("aic", base, aic_reg[0].len);
+-
++    struct adt_io_reg *aic_reg;
++    uint32_t reg_count;
+     int aic_vers = -1;
+-    sscanf(adt_get_prop_val(aic, "compatible"), "aic,%d", &aic_vers);
+-
+-    uint32_t num_irqs = 0;
++    uint32_t nr_irq = 0;
++    uint32_t max_irq = 0;
++    hwaddr event_base = 0;
++    uint64_t event_size = 0;
++
++    if (!aic) {
++        fprintf(stderr, "error: missing Apple AIC device-tree node\n");
++        exit(1);
++    }
++
++    aic_reg = adt_get_prop_val(aic, "reg");
++    reg_count = adt_get_prop_len(aic, "reg") / sizeof(*aic_reg);
++    if (!aic_reg || reg_count == 0 ||
++        1 != sscanf(adt_get_prop_val(aic, "compatible"), "aic,%d", &aic_vers)) {
++        fprintf(stderr, "error: invalid Apple AIC device-tree node\n");
++        exit(1);
++    }
++
+     switch (aic_vers) {
+         case 1:
+-            // aic,1 needs register +0x04 from first iobase to report the number of interrupts
+-            // This is always 8x the size of the ipid-mask for this device
+-            num_irqs = 8 * adt_get_prop_len(aic, "ipid-mask");
+-            address_space_write(&address_space_memory, base + 0x4, MEMTXATTRS_UNSPECIFIED, &num_irqs, sizeof(num_irqs));
++            /* AIC1 exposes one bit per interrupt in ipid-mask. */
++            nr_irq = 8 * adt_get_prop_len(aic, "ipid-mask");
++            max_irq = 0x400;
+             break;
+ 
+         case 2:
+         case 3:
+-            // aic,2 and aic,3 have num irqs at +0xC
+-            num_irqs = A_GOOD_NUMBER_OF_IRQS;
+-            address_space_write(&address_space_memory, base + 0xC, MEMTXATTRS_UNSPECIFIED, &num_irqs, sizeof(num_irqs));
++            /*
++             * Preserve the existing conservative IRQ geometry until
++             * per-SoC AIC2/3 capability discovery is available.
++             */
++            nr_irq = max_irq = A_GOOD_NUMBER_OF_IRQS;
++            if (reg_count < 2) {
++                fprintf(stderr,
++                        "error: AIC%d requires a separate event register region\n",
++                        aic_vers);
++                exit(1);
++            }
++            event_base = aic_reg[1].base + iobase;
++            event_size = aic_reg[1].len;
+             break;
+ 
+         default:
+-            fprintf(stderr, "warning: unsupported AIC, this will probably not work\n");
+-            break;
++            fprintf(stderr, "error: unsupported Apple AIC version %d\n",
++                    aic_vers);
++            exit(1);
+     }
++
++    return apple_aic_create(aic_vers, nr_irq, max_irq,
++                            aic_reg[0].base + iobase, aic_reg[0].len,
++                            event_base, event_size,
++                            qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
+ }
+ 
+ static void setup_mte(Object *cpuobj, MachineState *machine, struct xnu_boot_info *info) {
+     MemoryRegion *tag_sysmem = NULL;
+@@ -351,8 +379,7 @@ static void darwin_init(MachineState *ms) {
+     assert(0 == arm_io_ranges[0]); // child bus phys addr must be zero
+ 
+     init_uart(dt_root, iobase);
+-    init_aic(dt_root, iobase);
+     init_sep(dt_root);
+     init_cpu_impl(dt_root);
+ 
+     // M4 (T8132) asserts SME's max VQ len is this many.
+@@ -361,6 +388,7 @@ static void darwin_init(MachineState *ms) {
+ 
+     qdev_realize(DEVICE(cpuobj), NULL, &error_fatal);
+ 
++    s->aic = init_aic(dt_root, iobase, cpudev);
+     // On Apple Si, FIQ is hardwired to platform timer
+     qdev_connect_gpio_out(cpudev, GTIMER_HYPVIRT, qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
+ 
+-- 
+2.43.0

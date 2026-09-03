@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: phakoda <130813466+phakoda@users.noreply.github.com>
+Date: Tue, 1 Sep 2026 13:15:00 -0400
+Subject: [PATCH] darwin: validate AIC ADT properties before reading lengths
+
+The minimalist ADT helper assumes a property exists when querying its length.
+Check required AIC properties first so malformed or variant device trees fail
+with a useful error instead of dereferencing a missing property.
+---
+ hw/arm/darwin.c | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -141,22 +141,29 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+                                DeviceState *cpudev) {
+     struct dtree_node *aic = adt_find_node(dt_root, "arm-io/aic");
+     struct adt_io_reg *aic_reg;
++    const char *compatible;
+     uint32_t reg_count;
+     int aic_vers = -1;
+     uint32_t nr_irq = 0;
+     uint32_t max_irq = 0;
+     hwaddr event_base = 0;
+     uint64_t event_size = 0;
+ 
+     if (!aic) {
+         fprintf(stderr, "error: missing Apple AIC device-tree node\n");
+         exit(1);
+     }
+ 
+     aic_reg = adt_get_prop_val(aic, "reg");
+-    reg_count = adt_get_prop_len(aic, "reg") / sizeof(*aic_reg);
+-    if (!aic_reg || reg_count == 0 ||
+-        1 != sscanf(adt_get_prop_val(aic, "compatible"), "aic,%d", &aic_vers)) {
++    compatible = adt_get_prop_val(aic, "compatible");
++    if (!aic_reg || !compatible) {
++        fprintf(stderr, "error: incomplete Apple AIC device-tree node\n");
++        exit(1);
++    }
++
++    reg_count = adt_get_prop_len(aic, "reg") / sizeof(*aic_reg);
++    if (reg_count == 0 ||
++        1 != sscanf(compatible, "aic,%d", &aic_vers)) {
+         fprintf(stderr, "error: invalid Apple AIC device-tree node\n");
+         exit(1);
+     }
+@@ -168,5 +175,13 @@ static AppleAICState *init_aic(struct dtree_node *dt_root, uint64_t iobase,
+         case 1:
+             /* AIC1 exposes one bit per interrupt in ipid-mask. */
++            if (!adt_get_prop_val(aic, "ipid-mask")) {
++                fprintf(stderr, "error: AIC1 is missing ipid-mask\n");
++                exit(1);
++            }
+             nr_irq = 8 * adt_get_prop_len(aic, "ipid-mask");
++            if (!nr_irq) {
++                fprintf(stderr, "error: AIC1 has zero IRQs\n");
++                exit(1);
++            }
+             max_irq = 0x400;
+             break;
+-- 
+2.43.0

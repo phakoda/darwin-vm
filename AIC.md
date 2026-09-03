@@ -1,0 +1,72 @@
+# Apple Interrupt Controller bring-up
+
+A functional interrupt controller is a prerequisite for interactive devices in the Darwin machine.
+The existing QEMU machine only maps zero-filled AIC registers and reports an IRQ count; the ARM timer
+is wired directly to FIQ. That is enough for the current root-shell boot, but it gives USB, network,
+input, display, and GPU devices no way to signal XNU.
+
+## First implementation target
+
+The first AIC implementation stays deliberately narrow:
+
+- one CPU, matching the current Darwin machine's `max_cpus = 1`;
+- one die;
+- AIC v1, v2, and v3 MMIO layouts;
+- level-triggered hardware interrupt inputs;
+- software set/clear registers;
+- mask set/clear registers;
+- per-IRQ target/config storage;
+- event delivery to the CPU IRQ input;
+- event reads automatically mask the delivered IRQ, matching hardware;
+- lower interrupt numbers have priority;
+- basic AIC v1 self/other IPI delivery and masking;
+- timer FIQ remains directly wired as it is today.
+
+Multi-CPU affinity, multi-die routing, fast-IPI system-register behavior, PMU FIQs, and MSI domains can
+follow when the machine actually grows those features.
+
+## Register behavior used
+
+Linux's Apple AIC driver documents the essential hardware contract. For AIC v1, the register blocks
+are derived from a 0x400-IRQ maximum and land at:
+
+- `0x2004`: event/reason;
+- `0x3000`: target CPU array;
+- `0x4000`: software set;
+- `0x4080`: software clear;
+- `0x4100`: mask set;
+- `0x4180`: mask clear;
+- `0x4200`: hardware line state.
+
+For AIC v2/v3, the per-IRQ configuration block starts at `0x2000`/`0x10000` respectively, followed
+by software-set, software-clear, mask-set, mask-clear, and hardware-state bitmaps. Upstream Linux
+describes the AP event register as a second device-tree `reg` entry. Apple/Darwin device trees can
+also describe the IACK/event register inside the primary aperture with `aic-iack-offset`; the model
+accepts both layouts. The embedded form is bounds-checked so the four-byte event access cannot extend
+past the primary MMIO region.
+
+An IRQ event is encoded with event type `1` and the interrupt number in the low 16 bits. Reading the
+event register acknowledges and automatically masks the interrupt. The guest subsequently unmasks it
+through the mask-clear register as part of EOI.
+
+The Darwin initializer validates required AIC ADT properties before querying their lengths, because
+the minimal QEMU ADT helper assumes a property exists. The AIC device also validates that the primary
+MMIO aperture is large enough for its computed IRQ/config/mask blocks and that AIC2/3 has a usable
+event register before realization. Invalid firmware descriptions therefore fail at startup with an
+explicit error instead of turning into a host-side null dereference or later unmapped MMIO access.
+
+## Linux build validation
+
+The `aic-interrupt-controller` branch is compiled against the repository's pinned `qemu-sptm`
+revision on Ubuntu 24.04. CI copies the maintained AIC overlay into the QEMU source tree, applies the
+ordered Darwin patch series twice to verify idempotence, configures QEMU, builds
+`qemu-system-aarch64`, verifies the already-merged Darwin `boot-fb` machine option, and checks that the
+internal `apple-aic` QOM implementation is linked into the resulting binary. The AIC is instantiated
+by the Darwin machine from the guest ADT; it is intentionally not exposed as a generic user-created
+`-device` peripheral.
+
+## Why this comes before USB/networking
+
+QEMU already has reusable USB and network device models, but adding one before AIC would only create
+a device whose interrupt line goes nowhere. Once AIC exposes real per-IRQ inputs, subsequent patches
+can connect emulated peripherals to the interrupt numbers already described by the Apple device tree.

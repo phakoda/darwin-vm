@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: darwin-vm contributors <noreply@example.com>
+Date: Mon, 31 Aug 2026 14:25:00 -0400
+Subject: [PATCH] hw/arm: build Apple interrupt controller
+
+Compile the Apple AIC overlay as part of the ARM system sources.
+---
+ hw/arm/meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -115,7 +115,7 @@ arm_common_ss.add(files('boot.c'))
+ 
+ hw_common_arch += {'arm': arm_common_ss}
+ 
+-arm_common_ss.add(files('darwin.c', 'xnuboot_sptm.c', 'xnu_patch.c', 'apple_regs.c', 'apple_dtree.c', 'apple_amcc.c', 'macho.c'))
++arm_common_ss.add(files('darwin.c', 'xnuboot_sptm.c', 'xnu_patch.c', 'apple_regs.c', 'apple_dtree.c', 'apple_amcc.c', 'apple_aic.c', 'macho.c'))
+ 
+ arm_common_ss.add(custom_target('apple_regs_autogen.h',
+   output: 'apple_regs_autogen.h',
+-- 
+2.43.0
